@@ -169,7 +169,7 @@ function parseBulkText(text) {
     if (v === undefined) return "";
     let s = String(v).trim().replace(/[*＊]/g, ""); // 推定値等の「*」マーカーは除去して数値部分だけ使う
     // 「未」「-」「ー」「－」など数値でないものは未計測として空欄扱い（列はズラさない）
-    if (s === "" || isNaN(s)) return "";
+    if (s === "" || Number.isNaN(Number(s))) return "";
     return s;
   };
   for (const line of lines) {

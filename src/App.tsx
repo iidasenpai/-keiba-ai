@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, type CSSProperties } from "react";
 
 const AXIS = [
   { key: "saikou", label: "最高値" },
@@ -762,7 +762,7 @@ export default function KeibaYosouTool() {
   );
 }
 
-const styles = {
+const styles: Record<string, CSSProperties> = {
   page: {
     minHeight: "100vh",
     background: "#EFE9DA",

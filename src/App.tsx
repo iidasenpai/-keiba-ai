@@ -186,6 +186,156 @@ function buildBetSuggestions(ranked, raceProfile) {
   return bets;
 }
 
+
+function splitLoose(line) {
+  return line.trim().split(/\t|,|\s{2,}/).map((v) => v.trim()).filter(Boolean);
+}
+
+function parseRaceCardText(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const result = new Map();
+  let pendingNo = "";
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\d{1,2}$/.test(line)) {
+      pendingNo = line;
+      continue;
+    }
+    const compact = line.replace(/\s+/g, " ");
+    let match = compact.match(/^(\d{1,2})\s+([^\s]+)\s+(牡|牝|セ)\s*(\d+)\s+(.+?)\s+(\d{2}(?:\.\d)?)\s+(\d+(?:\.\d+)?)\s+(\d+)人気/);
+    if (!match && pendingNo) {
+      match = (`${pendingNo} ${compact}`).match(/^(\d{1,2})\s+([^\s]+)\s+(牡|牝|セ)\s*(\d+)\s+(.+?)\s+(\d{2}(?:\.\d)?)\s+(\d+(?:\.\d+)?)\s+(\d+)人気/);
+    }
+    if (match) {
+      const [, no, name, , , , , odds, popularity] = match;
+      result.set(no, { waku: no, name, odds, ninki: popularity });
+      pendingNo = "";
+      continue;
+    }
+    const cols = splitLoose(pendingNo ? `${pendingNo}\t${line}` : line);
+    if (cols.length >= 2 && /^\d{1,2}$/.test(cols[0]) && !["枠", "馬番"].includes(cols[0])) {
+      const no = cols[0];
+      const name = cols[1];
+      if (name && !/^[+\-]?\d/.test(name)) {
+        const popularityToken = [...cols].reverse().find((v) => /^\d+人気$/.test(v));
+        const popularity = popularityToken ? popularityToken.replace("人気", "") : "";
+        const oddsIndex = popularityToken ? cols.indexOf(popularityToken) - 1 : -1;
+        const odds = oddsIndex >= 0 && /^\d+(?:\.\d+)?$/.test(cols[oddsIndex]) ? cols[oddsIndex] : "";
+        result.set(no, { waku: no, name, odds, ninki: popularity });
+        pendingNo = "";
+      }
+    }
+  }
+  return result;
+}
+
+function parseStandardIndexText(text) {
+  const result = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const cols = splitLoose(line);
+    if (cols.length < 3 || !/^\d{1,2}$/.test(cols[0])) continue;
+    const no = cols[0];
+    const name = cols[1];
+    const values = cols.slice(2).filter((v) => /^(?:未|[-ー－]|[-+]?\d+(?:\.\d+)?\*?)$/.test(v)).slice(0, 4);
+    const clean = (v) => v && /^[-+]?\d/.test(v) ? v.replace(/\*/g, "") : "";
+    result.set(no, {
+      waku: no,
+      name,
+      saikou: clean(values[0]),
+      kinsou: clean(values[1]),
+      kyori: clean(values[2]),
+      course: clean(values[3]),
+    });
+  }
+  return result;
+}
+
+function parseRecentIndexText(text, selectedTrack, selectedDistance) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const result = new Map();
+  let currentNo = "";
+  let currentName = "";
+  const races = [];
+  const flush = () => {
+    if (!currentNo) return;
+    const recent = races.slice(0, 5);
+    const nums = recent.map((r) => r.value).filter(Number.isFinite);
+    const distanceNums = recent.filter((r) => r.distance === Number(selectedDistance)).map((r) => r.value);
+    const courseNums = recent.filter((r) => r.track === selectedTrack).map((r) => r.value);
+    const avg = (arr) => arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : "";
+    result.set(currentNo, {
+      waku: currentNo,
+      name: currentName,
+      recentMax: nums.length ? Math.max(...nums) : "",
+      kinsou: avg(nums),
+      kyoriRecent: avg(distanceNums),
+      courseRecent: avg(courseNums),
+    });
+  };
+  for (const line of lines) {
+    const header = line.match(/^(\d{1,2})\s+([^\s]+)/);
+    if (header && !/[ダ芝]\d{3,4}/.test(line)) {
+      flush();
+      currentNo = header[1];
+      currentName = header[2];
+      races.length = 0;
+      continue;
+    }
+    if (!currentNo) continue;
+    const race = line.match(/([^\s]+)[ダ芝](\d{3,4}).*?\b[HMS]\s+([-+]?\d+(?:\.\d+)?)/);
+    if (race) races.push({ track: race[1], distance: Number(race[2]), value: Number(race[3]) });
+  }
+  flush();
+  return result;
+}
+
+function parsePaceText(text) {
+  const result = new Map();
+  let style = "";
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const styleMatch = line.match(/^(逃げ|先行|差し|追込)\s*(.*)$/);
+    if (styleMatch) {
+      style = styleMatch[1];
+      const rest = styleMatch[2];
+      for (const m of rest.matchAll(/(?:^|\s)(\d{1,2})(?=\s|$)/g)) result.set(m[1], style);
+      continue;
+    }
+    if (style) for (const m of line.matchAll(/(?:^|\s)(\d{1,2})(?=\s|$)/g)) result.set(m[1], style);
+  }
+  return result;
+}
+
+function mergeFourSources(raceCardText, standardText, recentText, paceText, track, distance) {
+  const card = parseRaceCardText(raceCardText);
+  const standard = parseStandardIndexText(standardText);
+  const recent = parseRecentIndexText(recentText, track, distance);
+  const pace = parsePaceText(paceText);
+  const numbers = [...new Set([...card.keys(), ...standard.keys(), ...recent.keys(), ...pace.keys()])]
+    .sort((a, b) => Number(a) - Number(b));
+  return numbers.map((no) => {
+    const h = emptyHorse();
+    const c = card.get(no) ?? {};
+    const s = standard.get(no) ?? {};
+    const r = recent.get(no) ?? {};
+    h.waku = no;
+    h.name = c.name || s.name || r.name || `馬番${no}`;
+    h.odds = c.odds || "";
+    h.ninki = c.ninki || "";
+    h.ashimuki = pace.get(no) || "差し";
+    const standardMax = Number(s.saikou);
+    const recentMax = Number(r.recentMax);
+    h.saikou = Number.isFinite(standardMax) && Number.isFinite(recentMax)
+      ? String(Math.max(standardMax, recentMax))
+      : (s.saikou || (r.recentMax !== "" ? String(r.recentMax) : ""));
+    h.kinsou = r.kinsou !== "" ? String(r.kinsou) : (s.kinsou || "");
+    h.kyori = s.kyori || (r.kyoriRecent !== "" ? String(r.kyoriRecent) : "");
+    h.course = s.course || (r.courseRecent !== "" ? String(r.courseRecent) : "");
+    return h;
+  });
+}
+
 function parseBulkText(text) {
   const rawLines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   // 「馬番だけの行」→「--（区切り）」→「馬名＋データの行」という3行1組で貼り付けられる形式にも対応する。
@@ -271,6 +421,10 @@ export default function KeibaYosouTool() {
   const [horses, setHorses] = useState([emptyHorse(), emptyHorse(), emptyHorse()]);
   const [status, setStatus] = useState("");
   const [bulkText, setBulkText] = useState("");
+  const [raceCardText, setRaceCardText] = useState("");
+  const [standardIndexText, setStandardIndexText] = useState("");
+  const [recentIndexText, setRecentIndexText] = useState("");
+  const [paceText, setPaceText] = useState("");
   const [showBulk, setShowBulk] = useState(true);
   const [exportText, setExportText] = useState("");
   const [showExport, setShowExport] = useState(false);
@@ -341,13 +495,20 @@ export default function KeibaYosouTool() {
       flash("読み取れる行がありませんでした");
       return;
     }
-    if (mode === "replace") {
-      setHorses(parsed);
-    } else {
-      setHorses((hs) => [...hs.filter((h) => h.name.trim() !== ""), ...parsed]);
-    }
+    if (mode === "replace") setHorses(parsed);
+    else setHorses((hs) => [...hs.filter((h) => h.name.trim() !== ""), ...parsed]);
     setBulkText("");
     flash(`${parsed.length}頭を取り込みました`);
+  };
+
+  const applyFourSources = () => {
+    const parsed = mergeFourSources(raceCardText, standardIndexText, recentIndexText, paceText, track, distance);
+    if (parsed.length === 0) {
+      flash("4つの欄から馬番を読み取れませんでした");
+      return;
+    }
+    setHorses(parsed);
+    flash(`${parsed.length}頭を4種類のデータから統合しました`);
   };
 
   const flash = (msg) => {
@@ -598,10 +759,10 @@ export default function KeibaYosouTool() {
           単勝1倍に近いほど大きく加点し、オッズが上がるにつれてなだらかに効果が弱まります（しきい値で急に0になる崖はありません）。{oddsCap}倍のとき補正は最大の半分（+{Math.round(correctionStrength / 2 * 10) / 10}）、そこからさらに緩やかに減っていきます。オッズが分からず人気だけ入力されている場合も、人気順位から見込みオッズを推定して同じ計算をします。
         </p>
 
-        {/* Bulk paste */}
+        {/* Four-source paste */}
         <div style={styles.bulkBox}>
           <div style={styles.bulkHeader}>
-            <span style={styles.bulkTitle}>一括入力</span>
+            <span style={styles.bulkTitle}>4種類のデータを一括読込</span>
             <button style={styles.linkBtn} onClick={() => setShowBulk((v) => !v)}>
               {showBulk ? "閉じる" : "開く"}
             </button>
@@ -609,23 +770,25 @@ export default function KeibaYosouTool() {
           {showBulk && (
             <>
               <p style={styles.bulkHint}>
-                1行1頭。区切りはタブ／カンマ／スペース2つ以上どれでもOK。<br />
-                例：<code style={styles.code}>3, ダノンデサイル, 差し, 82, 75, 70, 68, 5.5, 3</code><br />
-                （枠, 馬名, 脚質, 最高値, 近走平均, 当該距離, 当該コース, 単勝オッズ, 人気の順。枠・脚質・オッズ・人気は省略可）<br />
-                「未」など未計測の値はそのまま貼ってOK（自動で空欄扱い）。5走平均・3走・2走・前走・性齢・斤量・騎手などの列がついた表をそのまま貼っても、4軸とオッズ・人気だけ拾って残りは無視します。「27*」のような*付き数値も数字部分だけ読み取ります。馬番が「1」「--」のように別行で貼られる形式にも対応済みです。
+                元サイトから「出走表」「タイム指数（標準）」「タイム指数（近5走）」「展開予測」を、それぞれ加工せず貼り付けてください。馬番をキーに統合します。
               </p>
-              <textarea
-                className="kbt-input"
-                style={styles.bulkTextarea}
-                value={bulkText}
-                onChange={(e) => setBulkText(e.target.value)}
-                placeholder={"1  ダノンデサイル  先行  85  80  78  75  5.5  3\n2  シャフリヤール  差し  88  82  80  84  2.1  1\n..."}
-                rows={5}
-              />
-              <div style={{ display: "flex", gap: 8 }}>
-                <button style={styles.ghostBtn} onClick={() => applyBulk("append")}>追加</button>
-                <button style={styles.ghostBtn} onClick={() => applyBulk("replace")}>置き換え</button>
-              </div>
+              <label style={styles.pasteLabel}>① 出走表</label>
+              <textarea className="kbt-input" style={styles.bulkTextarea} value={raceCardText} onChange={(e) => setRaceCardText(e.target.value)} placeholder="馬番・馬名・騎手・斤量・オッズ・人気などを含む出走表を貼り付け" rows={5} />
+              <label style={styles.pasteLabel}>② タイム指数（標準）</label>
+              <textarea className="kbt-input" style={styles.bulkTextarea} value={standardIndexText} onChange={(e) => setStandardIndexText(e.target.value)} placeholder="標準タイム指数の表を貼り付け" rows={5} />
+              <label style={styles.pasteLabel}>③ タイム指数（近5走）</label>
+              <textarea className="kbt-input" style={styles.bulkTextarea} value={recentIndexText} onChange={(e) => setRecentIndexText(e.target.value)} placeholder="各馬の近5走タイム指数を貼り付け" rows={7} />
+              <label style={styles.pasteLabel}>④ 展開予測</label>
+              <textarea className="kbt-input" style={styles.bulkTextarea} value={paceText} onChange={(e) => setPaceText(e.target.value)} placeholder={"逃げ 1 ...\n先行 4 ...\n差し 2 3 ...\n追込 5 ..."} rows={4} />
+              <button style={styles.primaryBtn} onClick={applyFourSources}>4種類を統合して置き換え</button>
+              <details style={{ marginTop: 12 }}>
+                <summary style={{ cursor: "pointer", fontSize: 13 }}>旧形式の1行1頭入力を使う</summary>
+                <textarea className="kbt-input" style={{ ...styles.bulkTextarea, marginTop: 8 }} value={bulkText} onChange={(e) => setBulkText(e.target.value)} placeholder="1  馬名  先行  85  80  78  75  5.5  3" rows={4} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={styles.ghostBtn} onClick={() => applyBulk("append")}>追加</button>
+                  <button style={styles.ghostBtn} onClick={() => applyBulk("replace")}>置き換え</button>
+                </div>
+              </details>
             </>
           )}
         </div>
@@ -972,6 +1135,7 @@ const styles: Record<string, CSSProperties> = {
     textDecoration: "underline",
     cursor: "pointer",
   },
+  pasteLabel: { display: "block", margin: "12px 0 5px", fontWeight: 700, fontSize: 13 },
   bulkHint: {
     fontSize: 12,
     color: "#6b6455",

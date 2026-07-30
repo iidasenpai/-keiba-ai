@@ -239,20 +239,86 @@ function automaticReviewText(result, ranked) {
   const placed = nums.map((n)=>ranked.find((h)=>String(h.waku)===n)).filter(Boolean);
   const hitTop = nums.filter((n)=>pred.slice(0,5).includes(n)).length;
   const winnerRank = pred.indexOf(nums[0]) + 1;
+  const finishMarks = nums.map((n)=>`${n}${marks.get(n) ? `(${marks.get(n)})` : "(無印)"}`).join("→");
   const missed = placed.filter((h)=>!pred.slice(0,5).includes(String(h.waku)));
-  let text = `結果 ${nums.join("-")}。印内は${hitTop}/3頭、勝ち馬は能力${winnerRank || "圏外"}位。`;
-  if (winnerRank === 1) text += "軸評価は正解。";
-  else if (winnerRank > 0 && winnerRank <= 3) text += "上位評価には入ったが順位付けを再検討。";
-  else text += "勝ち馬の評価軸を見直す必要あり。";
+  let text = `結果 ${nums.join("-")}［${finishMarks}］。印内は${hitTop}/3頭、勝ち馬は能力${winnerRank || "圏外"}位。`;
+  if (winnerRank === 1) text += "本命の軸評価は正解。";
+  else if (winnerRank > 0 && winnerRank <= 3) text += "勝ち馬は上位評価できており、印の順位付けが課題。";
+  else if (winnerRank > 0 && winnerRank <= 5) text += "相手には残せたが、勝ち切る材料を軽視した可能性。";
+  else text += "勝ち馬を拾えず、評価軸の見直しが必要。";
+
   if (missed.length) {
-    const h:any = missed[0];
-    const vals: [string, number][] = [["最高値",Number(h.saikou)||0],["近走",Number(h.kinsou)||0],["距離",Number(h.kyori)||0],["コース",Number(h.course)||0]];
-    vals.sort((a,b)=>b[1]-a[1]);
-    text += ` 見逃しは${h.waku}${h.name}。${vals[0][0]}${vals[0][1]}と脚質${h.ashimuki}を次回は再評価。`;
+    const details = missed.slice(0,2).map((h:any) => {
+      const vals: [string, number][] = [["最高値",Number(h.saikou)||0],["近走",Number(h.kinsou)||0],["距離",Number(h.kyori)||0],["コース",Number(h.course)||0]];
+      vals.sort((a,b)=>b[1]-a[1]);
+      return `${h.waku}${h.name}（${vals[0][0]}${vals[0][1]}・${h.ashimuki}）`;
+    });
+    text += ` 見逃しは${details.join("、")}。高い指数項目と脚質を次回は相手候補へ反映。`;
   }
+
+  const winner:any = placed[0];
+  if (winner) {
+    const axis: [string, number][] = [["最高値",Number(winner.saikou)||0],["近走",Number(winner.kinsou)||0],["距離",Number(winner.kyori)||0],["コース",Number(winner.course)||0]];
+    axis.sort((a,b)=>b[1]-a[1]);
+    if (winnerRank !== 1) text += ` 勝ち馬の強みは${axis[0][0]}${axis[0][1]}。この項目を少し重くする余地あり。`;
+  }
+
   const dangerIn = ranked.filter((h)=>h.danger && nums.includes(String(h.waku)));
-  if (dangerIn.length) text += ` 危険人気判定のうち${dangerIn.map(h=>h.waku).join("・")}が馬券内で、判定条件を弱める余地あり。`;
+  const dangerOut = ranked.filter((h)=>h.danger && !nums.includes(String(h.waku)));
+  if (dangerIn.length) text += ` 危険人気判定の${dangerIn.map(h=>h.waku).join("・")}が馬券内で、消し条件はやや厳しすぎた。`;
+  else if (dangerOut.length) text += ` 危険人気${dangerOut.map(h=>h.waku).join("・")}は馬券外で判定成功。`;
+
+  const topTwo = pred.slice(0,2);
+  if (nums.slice(0,2).every((n)=>topTwo.includes(n))) text += " 上位2頭で1・2着を押さえており、軸・相手選定は良好。";
+  else if (hitTop === 3) text += " 3頭とも印内で、買い目構成の改善が中心。";
   return text;
+}
+
+function csvEscape(value: unknown) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function reviewsToCsv(reviews: ReviewRecord[]) {
+  const headers = ["id","raceName","track","distance","raceClass","baba","result","reviewNote","createdAt","rankedJson","horsesJson"];
+  const rows = reviews.map((r) => [r.id,r.raceName,r.track,r.distance,r.raceClass,r.baba,r.result,r.reviewNote,r.createdAt,JSON.stringify(r.ranked ?? []),JSON.stringify(r.horses ?? [])]);
+  return [headers.map(csvEscape).join(","), ...rows.map((row)=>row.map(csvEscape).join(","))].join("\r\n");
+}
+
+function parseCsv(text: string) {
+  const rows:string[][]=[]; let row:string[]=[]; let field=""; let quoted=false;
+  for (let i=0;i<text.length;i++) {
+    const ch=text[i];
+    if (quoted) {
+      if (ch==='"' && text[i+1]==='"') { field+='"'; i++; }
+      else if (ch==='"') quoted=false;
+      else field+=ch;
+    } else {
+      if (ch==='"') quoted=true;
+      else if (ch===',') { row.push(field); field=""; }
+      else if (ch==='\n') { row.push(field.replace(/\r$/, "")); rows.push(row); row=[]; field=""; }
+      else field+=ch;
+    }
+  }
+  if (field.length || row.length) { row.push(field.replace(/\r$/, "")); rows.push(row); }
+  return rows;
+}
+
+function csvToReviews(text: string): ReviewRecord[] {
+  const rows=parseCsv(text).filter((r)=>r.some((v)=>v.trim()!==""));
+  if (rows.length<2) return [];
+  const headers=rows[0]; const idx=(name:string)=>headers.indexOf(name);
+  return rows.slice(1).map((row)=>{
+    const parseJson=(name:string)=>{ try { return JSON.parse(row[idx(name)] || "[]"); } catch { return []; } };
+    return {
+      id: row[idx("id")] || crypto.randomUUID(), raceName: row[idx("raceName")] || "",
+      track: row[idx("track")] || "", distance: row[idx("distance")] || "",
+      raceClass: row[idx("raceClass")] || "", baba: row[idx("baba")] || "良",
+      result: row[idx("result")] || "", reviewNote: row[idx("reviewNote")] || "",
+      createdAt: row[idx("createdAt")] || new Date().toISOString(),
+      ranked: parseJson("rankedJson"), horses: parseJson("horsesJson"),
+    };
+  }).filter((r)=>r.track || r.raceName || r.result);
 }
 
 function softmaxProbabilities(items, temperature = 5.5) {
@@ -708,6 +774,44 @@ export default function KeibaYosouTool() {
   const clearReviews = () => {
     if (!confirm("回顧データベースを全削除しますか？")) return;
     setReviews([]); localStorage.removeItem("keiba:reviews"); flash("回顧データを削除しました");
+  };
+
+
+  const downloadReviews = (format: "json" | "csv") => {
+    if (!reviews.length) { flash("書き出す回顧データがありません"); return; }
+    const content = format === "json" ? JSON.stringify({ version:1, exportedAt:new Date().toISOString(), reviews }, null, 2) : reviewsToCsv(reviews);
+    const blob = new Blob([format === "csv" ? "\uFEFF" + content : content], { type: format === "json" ? "application/json;charset=utf-8" : "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `keiba-review-backup-${new Date().toISOString().slice(0,10)}.${format}`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    flash(`${format.toUpperCase()}を書き出しました`);
+  };
+
+  const importReviewsFile = (format: "json" | "csv") => {
+    const input=document.createElement("input"); input.type="file"; input.accept=format === "json" ? ".json,application/json" : ".csv,text/csv";
+    input.onchange=async()=>{
+      const file=input.files?.[0]; if (!file) return;
+      try {
+        const text=await file.text(); let imported:ReviewRecord[]=[];
+        if (format === "json") {
+          const parsed=JSON.parse(text); imported=Array.isArray(parsed) ? parsed : Array.isArray(parsed?.reviews) ? parsed.reviews : [];
+        } else imported=csvToReviews(text.replace(/^\uFEFF/, ""));
+        imported=imported.filter((r)=>r && typeof r === "object").map((r:any)=>({
+          id:r.id || crypto.randomUUID(), raceName:String(r.raceName || ""), track:String(r.track || ""), distance:String(r.distance || ""),
+          raceClass:String(r.raceClass || ""), baba:String(r.baba || "良"), result:String(r.result || ""), reviewNote:String(r.reviewNote || ""),
+          createdAt:r.createdAt || new Date().toISOString(), ranked:Array.isArray(r.ranked)?r.ranked:[], horses:Array.isArray(r.horses)?r.horses:[],
+        }));
+        if (!imported.length) { flash("読み込める回顧データがありませんでした"); return; }
+        const replace=confirm(`${imported.length}件を読み取りました。\nOK：現在のDBを置き換え\nキャンセル：現在のDBへ追加`);
+        const base=replace ? [] : reviews;
+        const byId=new Map([...imported,...base].map((r)=>[r.id,r]));
+        const next=Array.from(byId.values()).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,500);
+        setReviews(next); localStorage.setItem("keiba:reviews",JSON.stringify(next));
+        flash(`${imported.length}件を復元しました`);
+      } catch (e) { console.error(e); flash("ファイルの読み込みに失敗しました"); }
+    };
+    input.click();
   };
 
   const updateHorse = (id, field, value) => {
@@ -1260,6 +1364,16 @@ export default function KeibaYosouTool() {
               {trackDistanceStats.map(([key,v])=><div key={key} style={styles.historyRow}><span>{key}　{v.count}戦</span><strong>◎{Math.round(v.win/v.count*100)}% ／ 印内{Math.round(v.trio/v.count*100)}%</strong></div>)}
             </div>}
             {reviews.slice(0,5).map((r)=><div key={r.id} style={styles.historyRow}><span>{new Date(r.createdAt).toLocaleDateString("ja-JP")} {r.track}{r.distance}m {r.raceName}</span><strong>{r.result}</strong></div>)}
+            <div style={styles.backupBox}>
+              <strong>バックアップ・復元</strong>
+              <div style={styles.backupButtons}>
+                <button style={styles.ghostBtn} onClick={()=>downloadReviews("json")}>JSON書き出し</button>
+                <button style={styles.ghostBtn} onClick={()=>downloadReviews("csv")}>CSV書き出し</button>
+                <button style={styles.ghostBtn} onClick={()=>importReviewsFile("json")}>JSON読み込み</button>
+                <button style={styles.ghostBtn} onClick={()=>importReviewsFile("csv")}>CSV読み込み</button>
+              </div>
+              <div style={styles.betNote}>読み込み時は「置き換え」か「追加」を選べます。端末変更前はJSON保存がおすすめです。</div>
+            </div>
             <button style={{...styles.linkBtn,marginTop:8}} onClick={clearReviews}>回顧DBを全削除</button>
           </div>
         )}
@@ -1595,6 +1709,8 @@ const styles: Record<string, CSSProperties> = {
   aiHorseHead: { display:"flex", justifyContent:"space-between", gap:8, fontSize:13 },
   scoreGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(82px,1fr))", gap:5, marginTop:6, fontSize:10, color:"#6b6455", fontFamily:"'JetBrains Mono', monospace" },
   aiComment: { marginTop:6, fontSize:11, lineHeight:1.6 },
+  backupBox: { marginTop:14, padding:"12px", border:"1px dashed #9B7B2F", background:"#FFFDF6" },
+  backupButtons: { display:"flex", gap:8, flexWrap:"wrap", marginTop:9 },
   autoReviewBox: { marginTop:10, padding:"10px 12px", border:"1px dashed #356B4A", background:"#F5FAF6", fontSize:11, lineHeight:1.7 },
   trackStatsTable: { marginTop:10, marginBottom:10, paddingTop:8, borderTop:"2px solid #1C1A17" },
 };

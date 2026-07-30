@@ -90,12 +90,7 @@ function oddsCorrection(h, correctionStrength, decayScale) {
     const factor = decayScale / (decayScale + odds);
     return Math.round(correctionStrength * factor * 10) / 10;
   }
-  if (ninki !== null && ninki > 0) {
-    // オッズが分からず人気だけ分かる場合は、人気順位を疑似オッズに換算して同じ曲線を使う
-    const pseudoOdds = ninki * 2 - 1; // 1人気≈1倍, 2人気≈3倍, 3人気≈5倍…という粗い換算
-    const factor = decayScale / (decayScale + pseudoOdds);
-    return Math.round(correctionStrength * factor * 10) / 10;
-  }
+  // 人気順位だけでは補正しない。実オッズが取得できた場合だけ馬券評価用の参考値を出す。
   return 0;
 }
 
@@ -194,37 +189,92 @@ function splitLoose(line) {
 function parseRaceCardText(text) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const result = new Map();
-  let pendingNo = "";
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (/^\d{1,2}$/.test(line)) {
-      pendingNo = line;
+  const blocks = [];
+  let current = null;
+
+  const pushCurrent = () => {
+    if (current) blocks.push(current);
+    current = null;
+  };
+
+  for (const line of lines) {
+    const standaloneNo = line.match(/^(\d{1,2})$/);
+    const inlineStart = line.match(/^(\d{1,2})[\t ,　]+(.+)$/);
+    if (standaloneNo) {
+      pushCurrent();
+      current = { no: standaloneNo[1], lines: [] };
       continue;
     }
-    const compact = line.replace(/\s+/g, " ");
-    let match = compact.match(/^(\d{1,2})\s+([^\s]+)\s+(牡|牝|セ)\s*(\d+)\s+(.+?)\s+(\d{2}(?:\.\d)?)\s+(\d+(?:\.\d+)?)\s+(\d+)人気/);
-    if (!match && pendingNo) {
-      match = (`${pendingNo} ${compact}`).match(/^(\d{1,2})\s+([^\s]+)\s+(牡|牝|セ)\s*(\d+)\s+(.+?)\s+(\d{2}(?:\.\d)?)\s+(\d+(?:\.\d+)?)\s+(\d+)人気/);
-    }
-    if (match) {
-      const [, no, name, , , , , odds, popularity] = match;
-      result.set(no, { waku: no, name, odds, ninki: popularity });
-      pendingNo = "";
+    if (inlineStart && !/[ダ芝]\d{3,4}/.test(line)) {
+      pushCurrent();
+      current = { no: inlineStart[1], lines: [inlineStart[2]] };
       continue;
     }
-    const cols = splitLoose(pendingNo ? `${pendingNo}\t${line}` : line);
-    if (cols.length >= 2 && /^\d{1,2}$/.test(cols[0]) && !["枠", "馬番"].includes(cols[0])) {
-      const no = cols[0];
-      const name = cols[1];
-      if (name && !/^[+\-]?\d/.test(name)) {
-        const popularityToken = [...cols].reverse().find((v) => /^\d+人気$/.test(v));
-        const popularity = popularityToken ? popularityToken.replace("人気", "") : "";
-        const oddsIndex = popularityToken ? cols.indexOf(popularityToken) - 1 : -1;
-        const odds = oddsIndex >= 0 && /^\d+(?:\.\d+)?$/.test(cols[oddsIndex]) ? cols[oddsIndex] : "";
-        result.set(no, { waku: no, name, odds, ninki: popularity });
-        pendingNo = "";
+    if (current) current.lines.push(line);
+  }
+  pushCurrent();
+
+  for (const block of blocks) {
+    const joined = block.lines.join(' ');
+    const nameLine = block.lines.find((line) => {
+      if (/^(牡|牝|セ)\d+/.test(line)) return false;
+      if (/^(?:[-+]?\d+(?:\.\d+)?|\d+人気|\([+-]?\d+\))$/.test(line)) return false;
+      if (/^(逃げ|先行|差し|追込|馬番|枠|馬名)/.test(line)) return false;
+      return /[ぁ-んァ-ヶ一-龠A-Za-z]/.test(line);
+    });
+    const name = nameLine ? splitLoose(nameLine)[0] : '';
+
+    let popularity = '';
+    let odds = '';
+    const popMatch = joined.match(/(\d{1,2})\s*人気/);
+    if (popMatch) {
+      popularity = popMatch[1];
+      const before = joined.slice(0, popMatch.index);
+      const nums = [...before.matchAll(/(?<![\d.])\d+(?:\.\d+)?(?![\d.])/g)].map((m) => m[0]);
+      const plausible = nums.filter((v) => Number(v) >= 1 && Number(v) < 1000);
+      if (plausible.length) odds = plausible[plausible.length - 1];
+    }
+
+    if (!odds) {
+      for (const line of block.lines) {
+        const m = line.match(/(?:単勝|オッズ)?\s*(\d+(?:\.\d+)?)\s*(?:倍)?\s+(\d{1,2})\s*人気/);
+        if (m) {
+          odds = m[1];
+          popularity = popularity || m[2];
+          break;
+        }
       }
     }
+
+    if (name) result.set(block.no, { waku: block.no, name, odds, ninki: popularity });
+  }
+
+  // 1頭1行の表形式にも対応
+  for (const line of lines) {
+    const cols = splitLoose(line.replace(/　/g, '  '));
+    if (cols.length < 2 || !/^\d{1,2}$/.test(cols[0])) continue;
+    const no = cols[0];
+    const name = cols[1];
+    if (!name || /^[+\-]?\d/.test(name)) continue;
+    const popToken = cols.find((v) => /^\d{1,2}人気$/.test(v));
+    const popularity = popToken ? popToken.replace('人気', '') : '';
+    let odds = '';
+    if (popToken) {
+      const popIndex = cols.indexOf(popToken);
+      for (let i = popIndex - 1; i >= 2; i -= 1) {
+        if (/^\d+(?:\.\d+)?(?:倍)?$/.test(cols[i])) {
+          odds = cols[i].replace('倍', '');
+          break;
+        }
+      }
+    }
+    const old = result.get(no) ?? {};
+    result.set(no, {
+      waku: no,
+      name: old.name || name,
+      odds: old.odds || odds,
+      ninki: old.ninki || popularity,
+    });
   }
   return result;
 }
@@ -415,8 +465,8 @@ export default function KeibaYosouTool() {
   const [reviewNote, setReviewNote] = useState("");
   const [baba, setBaba] = useState("良");
   const [oikomiBoost, setOikomiBoost] = useState(4);
-  const [correctionEnabled, setCorrectionEnabled] = useState(true);
-  const [correctionStrength, setCorrectionStrength] = useState(8);
+  const [correctionEnabled, setCorrectionEnabled] = useState(false);
+  const [correctionStrength, setCorrectionStrength] = useState(4);
   const [oddsCap, setOddsCap] = useState(4); // 減衰スケール：この倍率で補正が半分になる
   const [horses, setHorses] = useState([emptyHorse(), emptyHorse(), emptyHorse()]);
   const [status, setStatus] = useState("");
@@ -466,7 +516,7 @@ export default function KeibaYosouTool() {
         const danger = valueEdge !== null && valueEdge <= -5 && marketRank !== null && marketRank <= 3;
         return { ...horse, abilityRank: abilityRank.get(horse.id), marketRank, fairProb, marketProb, valueEdge, rankGap, valueGrade, danger };
       })
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => b.abilityScore - a.abilityScore);
   }, [horses, weights, oikomiBoost, effStrength, oddsCap, track]);
 
   const raceProfile = useMemo(() => {
@@ -508,7 +558,9 @@ export default function KeibaYosouTool() {
       return;
     }
     setHorses(parsed);
-    flash(`${parsed.length}頭を4種類のデータから統合しました`);
+    const oddsCount = parsed.filter((h) => h.odds !== "").length;
+    const popularityCount = parsed.filter((h) => h.ninki !== "").length;
+    flash(`${parsed.length}頭を統合（オッズ${oddsCount}頭・人気${popularityCount}頭）`);
   };
 
   const flash = (msg) => {
@@ -554,8 +606,8 @@ export default function KeibaYosouTool() {
       setReviewNote(data.reviewNote ?? "");
       setBaba(data.baba ?? "良");
       setOikomiBoost(data.oikomiBoost ?? 4);
-      setCorrectionEnabled(data.correctionEnabled ?? true);
-      setCorrectionStrength(data.correctionStrength ?? 8);
+      setCorrectionEnabled(data.correctionEnabled ?? false);
+      setCorrectionStrength(data.correctionStrength ?? 4);
       setOddsCap(data.oddsCap ?? 4);
       setHorses(data.horses?.length ? data.horses : [emptyHorse()]);
       setImportText("");
@@ -586,8 +638,8 @@ export default function KeibaYosouTool() {
       setReviewNote(data.reviewNote ?? "");
       setBaba(data.baba ?? "良");
       setOikomiBoost(data.oikomiBoost ?? 4);
-      setCorrectionEnabled(data.correctionEnabled ?? true);
-      setCorrectionStrength(data.correctionStrength ?? 8);
+      setCorrectionEnabled(data.correctionEnabled ?? false);
+      setCorrectionStrength(data.correctionStrength ?? 4);
       setOddsCap(data.oddsCap ?? 4);
       setHorses(data.horses?.length ? data.horses : [emptyHorse()]);
       flash("この端末のデータを読み込みました");
@@ -725,14 +777,14 @@ export default function KeibaYosouTool() {
               checked={correctionEnabled}
               onChange={(e) => setCorrectionEnabled(e.target.checked)}
             />
-            人気オッズ補正
+            馬券評価用の人気・オッズ補正
           </label>
           <div style={styles.controlItem}>
             <span style={styles.controlLabel}>補正の強さ</span>
             <input
               type="range"
               min="0"
-              max="20"
+              max="8"
               value={correctionStrength}
               disabled={!correctionEnabled}
               onChange={(e) => setCorrectionStrength(Number(e.target.value))}
@@ -756,7 +808,7 @@ export default function KeibaYosouTool() {
           </div>
         </div>
         <p style={styles.controlHint}>
-          単勝1倍に近いほど大きく加点し、オッズが上がるにつれてなだらかに効果が弱まります（しきい値で急に0になる崖はありません）。{oddsCap}倍のとき補正は最大の半分（+{Math.round(correctionStrength / 2 * 10) / 10}）、そこからさらに緩やかに減っていきます。オッズが分からず人気だけ入力されている場合も、人気順位から見込みオッズを推定して同じ計算をします。
+          初期設定はOFFです。能力順位と勝率目安は人気・オッズを使わず計算し、ON時の補正値は馬券判断の参考表示だけに使います。オッズ未取得時は補正されません。
         </p>
 
         {/* Four-source paste */}
@@ -925,7 +977,7 @@ export default function KeibaYosouTool() {
         {/* Ranking output */}
         {ranked.length > 0 && (
           <div style={styles.rankSection}>
-            <h2 style={styles.rankTitle}>指数ランキング</h2>
+            <h2 style={styles.rankTitle}>能力指数ランキング</h2>
             <div style={styles.rankList}>
               {ranked.map((h, i) => {
                 const corr = oddsCorrection(h, effStrength, oddsCap);
@@ -952,7 +1004,7 @@ export default function KeibaYosouTool() {
                     <div style={styles.rankMetrics}>
                       <span style={styles.probability}>{(h.fairProb * 100).toFixed(1)}%</span>
                       <span style={styles.metricSub}>勝率目安</span>
-                      <span style={styles.rankScore}>{h.score}</span>
+                      <span style={styles.rankScore}>{h.abilityScore}</span>
                     </div>
                   </div>
                 );

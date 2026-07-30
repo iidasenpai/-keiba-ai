@@ -17,6 +17,47 @@ const BABA_WEIGHTS = {
 };
 
 const MARKS = ["◎", "○", "▲", "△", "☆"];
+const LOCAL_TRACKS = [
+  "門別", "帯広", "盛岡", "水沢", "浦和", "船橋", "大井", "川崎",
+  "金沢", "笠松", "名古屋", "園田", "姫路", "高知", "佐賀",
+];
+
+const TRACK_BIAS: Record<string, { course: number; kyori: number; kinsou: number; saikou: number; front: number; closing: number }> = {
+  門別: { course: 0.03, kyori: 0.02, kinsou: 0.00, saikou: -0.05, front: 2, closing: 0 },
+  帯広: { course: 0.08, kyori: 0.03, kinsou: 0.02, saikou: -0.13, front: 0, closing: 0 },
+  盛岡: { course: 0.01, kyori: 0.02, kinsou: 0.02, saikou: -0.05, front: 0, closing: 2 },
+  水沢: { course: 0.04, kyori: 0.01, kinsou: 0.02, saikou: -0.07, front: 3, closing: -1 },
+  浦和: { course: 0.05, kyori: 0.01, kinsou: 0.01, saikou: -0.07, front: 4, closing: -2 },
+  船橋: { course: 0.03, kyori: 0.02, kinsou: 0.01, saikou: -0.06, front: 2, closing: 0 },
+  大井: { course: 0.02, kyori: 0.03, kinsou: 0.01, saikou: -0.06, front: 0, closing: 2 },
+  川崎: { course: 0.05, kyori: 0.01, kinsou: 0.01, saikou: -0.07, front: 4, closing: -2 },
+  金沢: { course: 0.04, kyori: 0.02, kinsou: 0.01, saikou: -0.07, front: 3, closing: -1 },
+  笠松: { course: 0.05, kyori: 0.02, kinsou: 0.01, saikou: -0.08, front: 4, closing: -2 },
+  名古屋: { course: 0.04, kyori: 0.03, kinsou: 0.01, saikou: -0.08, front: 3, closing: -1 },
+  園田: { course: 0.06, kyori: 0.03, kinsou: 0.01, saikou: -0.10, front: 3, closing: -1 },
+  姫路: { course: 0.05, kyori: 0.03, kinsou: 0.01, saikou: -0.09, front: 2, closing: 0 },
+  高知: { course: 0.04, kyori: 0.02, kinsou: 0.02, saikou: -0.08, front: 2, closing: 0 },
+  佐賀: { course: 0.04, kyori: 0.02, kinsou: 0.02, saikou: -0.08, front: 3, closing: -1 },
+};
+
+function trackAdjustedWeights(track: string, baba: string) {
+  const base = BABA_WEIGHTS[baba];
+  const bias = TRACK_BIAS[track] ?? { course: 0, kyori: 0, kinsou: 0, saikou: 0, front: 0, closing: 0 };
+  const raw = {
+    saikou: Math.max(0.05, base.saikou + bias.saikou),
+    kinsou: Math.max(0.05, base.kinsou + bias.kinsou),
+    kyori: Math.max(0.05, base.kyori + bias.kyori),
+    course: Math.max(0.05, base.course + bias.course),
+  };
+  const total = raw.saikou + raw.kinsou + raw.kyori + raw.course;
+  return {
+    saikou: raw.saikou / total,
+    kinsou: raw.kinsou / total,
+    kyori: raw.kyori / total,
+    course: raw.course / total,
+  };
+}
+
 
 const emptyHorse = () => ({
   id: crypto.randomUUID(),
@@ -58,7 +99,7 @@ function oddsCorrection(h, correctionStrength, decayScale) {
   return 0;
 }
 
-function scoreHorse(h, weights, oikomiBoost, correctionStrength, decayScale) {
+function scoreHorse(h, weights, oikomiBoost, correctionStrength, decayScale, track = "園田") {
   const v = (x) => {
     if (x === "" || x === null || isNaN(x)) return 0;
     // 四軸は0〜100の指数値である前提。範囲外の値（コピペミスや列ズレでマイナスや異常値が
@@ -70,7 +111,9 @@ function scoreHorse(h, weights, oikomiBoost, correctionStrength, decayScale) {
     v(h.kinsou) * weights.kinsou +
     v(h.kyori) * weights.kyori +
     v(h.course) * weights.course;
-  const boost = h.ashimuki === "差し" || h.ashimuki === "追込" ? oikomiBoost : 0;
+  const bias = TRACK_BIAS[track] ?? { front: 0, closing: 0 };
+  const styleBias = h.ashimuki === "逃げ" || h.ashimuki === "先行" ? bias.front : bias.closing;
+  const boost = (h.ashimuki === "差し" || h.ashimuki === "追込" ? oikomiBoost : 0) + styleBias;
   const correction = oddsCorrection(h, correctionStrength, decayScale);
   return Math.round((base + boost + correction) * 10) / 10;
 }
@@ -215,6 +258,11 @@ function parseBulkText(text) {
 
 export default function KeibaYosouTool() {
   const [raceName, setRaceName] = useState("");
+  const [track, setTrack] = useState("園田");
+  const [distance, setDistance] = useState("1400");
+  const [raceClass, setRaceClass] = useState("");
+  const [result, setResult] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
   const [baba, setBaba] = useState("良");
   const [oikomiBoost, setOikomiBoost] = useState(4);
   const [correctionEnabled, setCorrectionEnabled] = useState(true);
@@ -229,7 +277,7 @@ export default function KeibaYosouTool() {
   const [importText, setImportText] = useState("");
   const [showImport, setShowImport] = useState(false);
 
-  const weights = BABA_WEIGHTS[baba];
+  const weights = trackAdjustedWeights(track, baba);
   const effStrength = correctionEnabled ? correctionStrength : 0;
 
   const ranked = useMemo(() => {
@@ -237,8 +285,8 @@ export default function KeibaYosouTool() {
       .filter((h) => h.name.trim() !== "")
       .map((h) => ({
         ...h,
-        abilityScore: scoreHorse(h, weights, oikomiBoost, 0, oddsCap),
-        score: scoreHorse(h, weights, oikomiBoost, effStrength, oddsCap),
+        abilityScore: scoreHorse(h, weights, oikomiBoost, 0, oddsCap, track),
+        score: scoreHorse(h, weights, oikomiBoost, effStrength, oddsCap, track),
         stability: stabilityScore(h),
       }));
 
@@ -265,7 +313,7 @@ export default function KeibaYosouTool() {
         return { ...horse, abilityRank: abilityRank.get(horse.id), marketRank, fairProb, marketProb, valueEdge, rankGap, valueGrade, danger };
       })
       .sort((a, b) => b.score - a.score);
-  }, [horses, weights, oikomiBoost, effStrength, oddsCap]);
+  }, [horses, weights, oikomiBoost, effStrength, oddsCap, track]);
 
   const raceProfile = useMemo(() => {
     if (ranked.length < 2) return { level: 1, label: "判定待ち", gap: 0 };
@@ -312,7 +360,7 @@ export default function KeibaYosouTool() {
       flash("レース名を入力してから保存してください");
       return;
     }
-    const payload = JSON.stringify({ raceName, baba, oikomiBoost, correctionEnabled, correctionStrength, oddsCap, horses });
+    const payload = JSON.stringify({ raceName, track, distance, raceClass, baba, oikomiBoost, correctionEnabled, correctionStrength, oddsCap, horses, result, reviewNote });
     try {
       const key = `race:${sanitizeKey(raceName)}`;
       localStorage.setItem(key, payload);
@@ -325,7 +373,7 @@ export default function KeibaYosouTool() {
   };
 
   const doExport = () => {
-    const payload = JSON.stringify({ raceName, baba, oikomiBoost, correctionEnabled, correctionStrength, oddsCap, horses });
+    const payload = JSON.stringify({ raceName, track, distance, raceClass, baba, oikomiBoost, correctionEnabled, correctionStrength, oddsCap, horses, result, reviewNote });
     setExportText(payload);
     setShowExport(true);
   };
@@ -338,6 +386,11 @@ export default function KeibaYosouTool() {
     try {
       const data = JSON.parse(importText.trim());
       setRaceName(data.raceName ?? "");
+      setTrack(data.track ?? "園田");
+      setDistance(data.distance ?? "1400");
+      setRaceClass(data.raceClass ?? "");
+      setResult(data.result ?? "");
+      setReviewNote(data.reviewNote ?? "");
       setBaba(data.baba ?? "良");
       setOikomiBoost(data.oikomiBoost ?? 4);
       setCorrectionEnabled(data.correctionEnabled ?? true);
@@ -365,6 +418,11 @@ export default function KeibaYosouTool() {
         return;
       }
       const data = JSON.parse(value);
+      setTrack(data.track ?? "園田");
+      setDistance(data.distance ?? "1400");
+      setRaceClass(data.raceClass ?? "");
+      setResult(data.result ?? "");
+      setReviewNote(data.reviewNote ?? "");
       setBaba(data.baba ?? "良");
       setOikomiBoost(data.oikomiBoost ?? 4);
       setCorrectionEnabled(data.correctionEnabled ?? true);
@@ -393,16 +451,21 @@ export default function KeibaYosouTool() {
         <div style={styles.masthead}>
           <div style={styles.vertStrip}>四軸指数・馬柱予想帳</div>
           <div style={styles.mastheadMain}>
-            <h1 style={styles.title}>予想帳 <span style={styles.versionTag}>Ver2.1</span></h1>
-            <p style={styles.subtitle}>最高値 ／ 近走平均 ／ 当該距離 ／ 当該コース</p>
+            <h1 style={styles.title}>予想帳 <span style={styles.versionTag}>Ver3.0 地方全場</span></h1>
+            <p style={styles.subtitle}>地方競馬15場対応 ／ 会場別バイアス ／ 予想・結果・回顧</p>
             <div style={styles.mastheadControls}>
               <input
                 className="kbt-input"
                 style={styles.raceNameInput}
-                placeholder="レース名（例：函館記念）"
+                placeholder="レース名（例：園田8R C3一）"
                 value={raceName}
                 onChange={(e) => setRaceName(e.target.value)}
               />
+              <select className="kbt-select" style={styles.babaSelect} value={track} onChange={(e) => setTrack(e.target.value)}>
+                {LOCAL_TRACKS.map((t) => <option key={t} value={t}>競馬場：{t}</option>)}
+              </select>
+              <input className="kbt-input" type="number" style={{ ...styles.babaSelect, width: 110 }} value={distance} onChange={(e) => setDistance(e.target.value)} placeholder="距離m" />
+              <input className="kbt-input" style={{ ...styles.babaSelect, width: 130 }} value={raceClass} onChange={(e) => setRaceClass(e.target.value)} placeholder="クラス・条件" />
               <select
                 className="kbt-select"
                 style={styles.babaSelect}
@@ -464,6 +527,12 @@ export default function KeibaYosouTool() {
           </div>
         )}
 
+
+        <div style={styles.trackProfile}>
+          <strong>{track} {distance ? `${distance}m` : ""}</strong>
+          <span>コース重視 ×{weights.course.toFixed(2)}／距離重視 ×{weights.kyori.toFixed(2)}</span>
+          <span>脚質補正：前 {TRACK_BIAS[track]?.front ?? 0}・後 {TRACK_BIAS[track]?.closing ?? 0}</span>
+        </div>
 
         {/* Weight readout */}
         <div style={styles.weightBar}>
@@ -744,6 +813,15 @@ export default function KeibaYosouTool() {
           </div>
         )}
 
+        <div style={styles.reviewBox}>
+          <div style={styles.betTitle}>結果・回顧</div>
+          <div style={styles.reviewGrid}>
+            <input className="kbt-input" style={styles.raceNameInput} value={result} onChange={(e) => setResult(e.target.value)} placeholder="結果（例：1-4-7）" />
+            <textarea className="kbt-input" style={styles.reviewTextarea} value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="展開、見落とし、次回の修正点を記録" rows={3} />
+          </div>
+          <div style={styles.betNote}>保存すると予想データと結果・回顧を同じレース名で端末に残せます。</div>
+        </div>
+
         {/* 3頭選ぶなら */}
         {top3.length === 3 && (
           <div style={styles.distillBox}>
@@ -836,6 +914,10 @@ const styles: Record<string, CSSProperties> = {
     display: "inline-block",
     marginBottom: 12,
   },
+  trackProfile: { display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "10px 12px", background: "#1C1A17", color: "#EFE9DA", marginBottom: 10, fontSize: 12 },
+  reviewBox: { border: "2px solid #1C1A17", background: "#fff", padding: 14, marginTop: 18, marginBottom: 16 },
+  reviewGrid: { display: "grid", gridTemplateColumns: "minmax(180px, 0.4fr) minmax(260px, 1fr)", gap: 10, marginTop: 10 },
+  reviewTextarea: { width: "100%", padding: 10, border: "1px solid #1C1A17", resize: "vertical", fontFamily: "inherit" },
   weightBar: {
     display: "flex",
     gap: 10,

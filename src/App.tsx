@@ -62,7 +62,16 @@ type ReviewRecord = {
 };
 
 function profileFor(track: string, distance: string) {
-  return DISTANCE_PROFILES[`${track}:${distance}`] ?? null;
+  const exact = DISTANCE_PROFILES[`${track}:${distance}`];
+  if (exact) return exact;
+  const d = Number(distance);
+  if (!Number.isFinite(d)) return null;
+  // 全15場の未登録距離も、距離帯に応じた共通プロファイルで自動対応する。
+  if (d <= 1000) return { kyori: 0.07, course: 0.03, kinsou: -0.01, saikou: -0.09, front: 6, closing: -4, note: "超短距離：スタートと先行力を重視" };
+  if (d <= 1300) return { kyori: 0.05, course: 0.03, kinsou: 0.01, saikou: -0.09, front: 4, closing: -1, note: "短距離：スピード持続力を重視" };
+  if (d <= 1600) return { kyori: 0.04, course: 0.04, kinsou: 0.02, saikou: -0.10, front: 3, closing: 0, note: "マイル前後：コース適性と安定度を重視" };
+  if (d <= 1900) return { kyori: 0.07, course: 0.04, kinsou: 0.02, saikou: -0.13, front: 1, closing: 1, note: "中距離：距離適性と持続力を重視" };
+  return { kyori: 0.09, course: 0.03, kinsou: 0.02, saikou: -0.14, front: -1, closing: 3, note: "長距離：スタミナと差し脚を重視" };
 }
 
 function parseResultNumbers(result: string) {
@@ -188,6 +197,62 @@ function stabilityScore(h) {
   const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   const sd = Math.sqrt(variance);
   return Math.max(0, Math.min(100, Math.round((100 - sd * 5) * 10) / 10));
+}
+
+function scoreBreakdown(h, weights, oikomiBoost, track, distance) {
+  const val = (x) => x === "" || !Number.isFinite(Number(x)) ? 0 : Math.max(0, Math.min(100, Number(x)));
+  const bias = TRACK_BIAS[track] ?? { front: 0, closing: 0 };
+  const dp = profileFor(track, distance);
+  const style = h.ashimuki === "逃げ" || h.ashimuki === "先行"
+    ? bias.front + (dp?.front ?? 0)
+    : bias.closing + (dp?.closing ?? 0) + ((h.ashimuki === "差し" || h.ashimuki === "追込") ? oikomiBoost : 0);
+  return {
+    ability: Math.round(val(h.saikou) * 10) / 10,
+    recent: Math.round(val(h.kinsou) * 10) / 10,
+    distance: Math.round(val(h.kyori) * 10) / 10,
+    course: Math.round(val(h.course) * 10) / 10,
+    pace: Math.round(Math.max(0, Math.min(100, 50 + style * 5)) * 10) / 10,
+    total: scoreHorse(h, { ...weights, __distance: distance }, oikomiBoost, 0, 4, track),
+  };
+}
+
+function horseAiComment(h, track, distance, weights, oikomiBoost) {
+  const b = scoreBreakdown(h, weights, oikomiBoost, track, distance);
+  const axes = [
+    ["最高値", b.ability], ["近走", b.recent], ["距離", b.distance], ["コース", b.course], ["展開", b.pace],
+  ].sort((a:any,b:any)=>b[1]-a[1]);
+  const strengths = axes.filter((x:any)=>x[1] >= 60).slice(0,2).map((x:any)=>x[0]);
+  const weakness = axes.find((x:any)=>x[1] > 0 && x[1] < 35);
+  const styleText = h.ashimuki === "逃げ" || h.ashimuki === "先行" ? "前で運べる点" : "差し脚";
+  let text = strengths.length ? `${strengths.join("・")}が強み。${styleText}も評価。` : `${styleText}を軸に相手関係で評価。`;
+  if (weakness) text += `${weakness[0]}は弱めで過信禁物。`;
+  if (h.valueGrade && h.valueGrade !== "-") text += `オッズ面は期待値${h.valueGrade}。`;
+  if (h.danger) text += "人気先行の可能性があり注意。";
+  return text;
+}
+
+function automaticReviewText(result, ranked) {
+  const nums = parseResultNumbers(result);
+  if (nums.length < 3 || !ranked.length) return "結果を1-2-3形式で入力すると自動回顧を表示します。";
+  const pred = ranked.map((h)=>String(h.waku));
+  const marks = new Map(pred.slice(0,5).map((n,i)=>[n, MARKS[i]]));
+  const placed = nums.map((n)=>ranked.find((h)=>String(h.waku)===n)).filter(Boolean);
+  const hitTop = nums.filter((n)=>pred.slice(0,5).includes(n)).length;
+  const winnerRank = pred.indexOf(nums[0]) + 1;
+  const missed = placed.filter((h)=>!pred.slice(0,5).includes(String(h.waku)));
+  let text = `結果 ${nums.join("-")}。印内は${hitTop}/3頭、勝ち馬は能力${winnerRank || "圏外"}位。`;
+  if (winnerRank === 1) text += "軸評価は正解。";
+  else if (winnerRank > 0 && winnerRank <= 3) text += "上位評価には入ったが順位付けを再検討。";
+  else text += "勝ち馬の評価軸を見直す必要あり。";
+  if (missed.length) {
+    const h:any = missed[0];
+    const vals: [string, number][] = [["最高値",Number(h.saikou)||0],["近走",Number(h.kinsou)||0],["距離",Number(h.kyori)||0],["コース",Number(h.course)||0]];
+    vals.sort((a,b)=>b[1]-a[1]);
+    text += ` 見逃しは${h.waku}${h.name}。${vals[0][0]}${vals[0][1]}と脚質${h.ashimuki}を次回は再評価。`;
+  }
+  const dangerIn = ranked.filter((h)=>h.danger && nums.includes(String(h.waku)));
+  if (dangerIn.length) text += ` 危険人気判定のうち${dangerIn.map(h=>h.waku).join("・")}が馬券内で、判定条件を弱める余地あり。`;
+  return text;
 }
 
 function softmaxProbabilities(items, temperature = 5.5) {
@@ -580,10 +645,12 @@ export default function KeibaYosouTool() {
         const rankGap = marketRank ? marketRank - abilityRank.get(horse.id) : null;
         const valueGrade = valueEdge !== null && valueEdge >= 5 ? "A" : valueEdge !== null && valueEdge >= 2 ? "B" : rankGap !== null && rankGap >= 3 ? "B" : "-";
         const danger = valueEdge !== null && valueEdge <= -5 && marketRank !== null && marketRank <= 3;
-        return { ...horse, abilityRank: abilityRank.get(horse.id), marketRank, fairProb, marketProb, valueEdge, rankGap, valueGrade, danger };
+        const breakdown = scoreBreakdown(horse, weights, oikomiBoost, track, distance);
+        const enriched = { ...horse, abilityRank: abilityRank.get(horse.id), marketRank, fairProb, marketProb, valueEdge, rankGap, valueGrade, danger, breakdown };
+        return { ...enriched, aiComment: horseAiComment(enriched, track, distance, weights, oikomiBoost) };
       })
       .sort((a, b) => b.abilityScore - a.abilityScore);
-  }, [horses, weights, oikomiBoost, effStrength, oddsCap, track]);
+  }, [horses, weights, oikomiBoost, effStrength, oddsCap, track, distance]);
 
   const raceProfile = useMemo(() => {
     if (ranked.length < 2) return { level: 1, label: "判定待ち", gap: 0, topGap:0, reason:"データ不足" };
@@ -602,6 +669,17 @@ export default function KeibaYosouTool() {
 
   const betSuggestions = useMemo(() => buildBetSuggestions(ranked, raceProfile), [ranked, raceProfile]);
   const top3 = ranked.slice(0, 3);
+  const autoReview = useMemo(() => automaticReviewText(result, ranked), [result, ranked]);
+  const trackDistanceStats = useMemo(() => {
+    const groups:Record<string,{count:number,win:number,trio:number}> = {};
+    for (const r of reviews.filter((x)=>parseResultNumbers(x.result).length)) {
+      const key=`${r.track}${r.distance}m`; const res=parseResultNumbers(r.result); const pred=(r.ranked??[]).map((h)=>String(h.waku));
+      groups[key] ??= {count:0,win:0,trio:0}; groups[key].count++;
+      if (pred[0]===res[0]) groups[key].win++;
+      if (res.length>=3 && res.every((n)=>pred.slice(0,5).includes(n))) groups[key].trio++;
+    }
+    return Object.entries(groups).sort((a,b)=>b[1].count-a[1].count).slice(0,12);
+  }, [reviews]);
   const stats = useMemo(() => {
     const completed = reviews.filter((r)=>parseResultNumbers(r.result).length);
     const subset = completed.filter((r)=>r.track===track && r.distance===distance);
@@ -621,7 +699,7 @@ export default function KeibaYosouTool() {
 
   const saveReview = () => {
     if (!result.trim()) { flash("結果（例：1-4-7）を入力してください"); return; }
-    const rec:ReviewRecord={ id:crypto.randomUUID(), raceName:raceName||`${track}${distance}m`, track, distance, raceClass, baba, result, reviewNote, createdAt:new Date().toISOString(), ranked:ranked.map((h)=>({...h})), horses:horses.map((h)=>({...h})) };
+    const rec:ReviewRecord={ id:crypto.randomUUID(), raceName:raceName||`${track}${distance}m`, track, distance, raceClass, baba, result, reviewNote: reviewNote.trim() || autoReview, createdAt:new Date().toISOString(), ranked:ranked.map((h)=>({...h})), horses:horses.map((h)=>({...h})) };
     const next=[rec,...reviews].slice(0,500);
     setReviews(next); localStorage.setItem("keiba:reviews",JSON.stringify(next));
     flash("回顧データベースに登録しました");
@@ -766,7 +844,7 @@ export default function KeibaYosouTool() {
         <div style={styles.masthead}>
           <div style={styles.vertStrip}>四軸指数・馬柱予想帳</div>
           <div style={styles.mastheadMain}>
-            <h1 style={styles.title}>予想帳 <span style={styles.versionTag}>Ver6.0 学習DB</span></h1>
+            <h1 style={styles.title}>予想帳 <span style={styles.versionTag}>Ver7.0 AI分析</span></h1>
             <p style={styles.subtitle}>地方競馬15場対応 ／ 距離別ロジック ／ 回顧DB・自動学習</p>
             <div style={styles.mastheadControls}>
               <input
@@ -1126,6 +1204,21 @@ export default function KeibaYosouTool() {
           </div>
         )}
 
+        {ranked.length > 0 && (
+          <div style={styles.aiPanel}>
+            <div style={styles.betTitle}>AIスコア・自動コメント</div>
+            {ranked.slice(0,5).map((h, i) => (
+              <div key={h.id} style={styles.aiHorseCard}>
+                <div style={styles.aiHorseHead}><strong>{MARKS[i] ?? "－"} {h.waku} {h.name}</strong><span>総合 {h.breakdown.total}</span></div>
+                <div style={styles.scoreGrid}>
+                  <span>能力 {h.breakdown.ability}</span><span>近走 {h.breakdown.recent}</span><span>距離 {h.breakdown.distance}</span><span>コース {h.breakdown.course}</span><span>展開 {h.breakdown.pace}</span>
+                </div>
+                <div style={styles.aiComment}>{h.aiComment}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {betSuggestions.length > 0 && (
           <div style={styles.betBox}>
             <div style={styles.betTitle}>推奨買い目（点数を絞るためのたたき台）</div>
@@ -1147,6 +1240,7 @@ export default function KeibaYosouTool() {
             <input className="kbt-input" style={styles.raceNameInput} value={result} onChange={(e) => setResult(e.target.value)} placeholder="結果（例：1-4-7）" />
             <textarea className="kbt-input" style={styles.reviewTextarea} value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="展開、見落とし、次回の修正点を記録" rows={3} />
           </div>
+          <div style={styles.autoReviewBox}><strong>AI自動回顧</strong><br/>{autoReview}</div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
             <button style={styles.ghostBtn} onClick={saveReview}>結果を回顧DBへ登録</button>
             <button style={styles.ghostBtn} onClick={()=>setShowStats((v)=>!v)}>{showStats?"統計を閉じる":"統計を見る"}</button>
@@ -1161,6 +1255,10 @@ export default function KeibaYosouTool() {
               <div><strong>{track}{distance}m</strong><br/>登録 {stats.current.count}戦<br/>◎勝率 {stats.current.count?Math.round(stats.current.win/stats.current.count*100):0}%<br/>上位2頭内で1・2着 {stats.current.count?Math.round(stats.current.exacta/stats.current.count*100):0}%<br/>印5頭内三着内網羅 {stats.current.count?Math.round(stats.current.trio/stats.current.count*100):0}%</div>
               <div><strong>全会場</strong><br/>登録 {stats.all.count}戦<br/>◎勝率 {stats.all.count?Math.round(stats.all.win/stats.all.count*100):0}%<br/>危険人気消し成功 {stats.all.dangerTotal?Math.round(stats.all.dangerHit/stats.all.dangerTotal*100):0}%<br/>保存上限 500戦</div>
             </div>
+            {trackDistanceStats.length > 0 && <div style={styles.trackStatsTable}>
+              <strong>会場・距離別</strong>
+              {trackDistanceStats.map(([key,v])=><div key={key} style={styles.historyRow}><span>{key}　{v.count}戦</span><strong>◎{Math.round(v.win/v.count*100)}% ／ 印内{Math.round(v.trio/v.count*100)}%</strong></div>)}
+            </div>}
             {reviews.slice(0,5).map((r)=><div key={r.id} style={styles.historyRow}><span>{new Date(r.createdAt).toLocaleDateString("ja-JP")} {r.track}{r.distance}m {r.raceName}</span><strong>{r.result}</strong></div>)}
             <button style={{...styles.linkBtn,marginTop:8}} onClick={clearReviews}>回顧DBを全削除</button>
           </div>
@@ -1492,4 +1590,11 @@ const styles: Record<string, CSSProperties> = {
   statsBox: { border:"2px solid #1C1A17", background:"#fff", padding:14, marginBottom:18 },
   statsGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:10, lineHeight:1.8, fontSize:12 },
   historyRow: { display:"flex", justifyContent:"space-between", gap:10, borderTop:"1px solid #E5DECF", padding:"6px 0", fontSize:11 },
+  aiPanel: { border:"2px solid #1C1A17", background:"#fff", padding:14, marginBottom:18 },
+  aiHorseCard: { borderTop:"1px solid #E5DECF", padding:"9px 0" },
+  aiHorseHead: { display:"flex", justifyContent:"space-between", gap:8, fontSize:13 },
+  scoreGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(82px,1fr))", gap:5, marginTop:6, fontSize:10, color:"#6b6455", fontFamily:"'JetBrains Mono', monospace" },
+  aiComment: { marginTop:6, fontSize:11, lineHeight:1.6 },
+  autoReviewBox: { marginTop:10, padding:"10px 12px", border:"1px dashed #356B4A", background:"#F5FAF6", fontSize:11, lineHeight:1.7 },
+  trackStatsTable: { marginTop:10, marginBottom:10, paddingTop:8, borderTop:"2px solid #1C1A17" },
 };

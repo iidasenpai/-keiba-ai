@@ -58,7 +58,7 @@ const DISTANCE_PROFILES: Record<string, { kyori: number; course: number; kinsou:
 
 type ReviewRecord = {
   id: string; raceName: string; track: string; distance: string; raceClass: string; baba: string;
-  result: string; reviewNote: string; createdAt: string; ranked: any[]; horses: any[];
+  result: string; reviewNote: string; createdAt: string; updatedAt?: string; ranked: any[]; horses: any[];
 };
 
 function profileFor(track: string, distance: string) {
@@ -676,6 +676,9 @@ export default function KeibaYosouTool() {
   });
   const [autoLearning, setAutoLearning] = useState(true);
   const [showStats, setShowStats] = useState(true);
+  const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
+  const [savedResultInput, setSavedResultInput] = useState("");
+  const [savedReviewInput, setSavedReviewInput] = useState("");
 
   const learned = useMemo(() => autoLearning ? learnedAxisAdjustments(reviews, track, distance) : { saikou:0, kinsou:0, kyori:0, course:0, count:0 }, [reviews, track, distance, autoLearning]);
   const weights = useMemo(() => ({ ...trackAdjustedWeights(track, baba, distance, learned), __distance: distance }), [track, baba, distance, learned]);
@@ -763,17 +766,57 @@ export default function KeibaYosouTool() {
     return { all:calc(completed), current:calc(subset) };
   }, [reviews, track, distance]);
 
-  const saveReview = () => {
-    if (!result.trim()) { flash("結果（例：1-4-7）を入力してください"); return; }
-    const rec:ReviewRecord={ id:crypto.randomUUID(), raceName:raceName||`${track}${distance}m`, track, distance, raceClass, baba, result, reviewNote: reviewNote.trim() || autoReview, createdAt:new Date().toISOString(), ranked:ranked.map((h)=>({...h})), horses:horses.map((h)=>({...h})) };
-    const next=[rec,...reviews].slice(0,500);
-    setReviews(next); localStorage.setItem("keiba:reviews",JSON.stringify(next));
-    flash("回顧データベースに登録しました");
+  const persistReviews = (next: ReviewRecord[]) => {
+    const limited = next.slice(0, 500);
+    setReviews(limited);
+    localStorage.setItem("keiba:reviews", JSON.stringify(limited));
+  };
+
+  const savePrediction = () => {
+    if (!raceName.trim()) { flash("レース名を入力してください"); return; }
+    if (!ranked.length) { flash("先に出走データを読み込んで分析してください"); return; }
+    const rec: ReviewRecord = {
+      id: crypto.randomUUID(), raceName: raceName.trim(), track, distance, raceClass, baba,
+      result: "", reviewNote: "", createdAt: new Date().toISOString(),
+      ranked: ranked.map((h)=>({...h})), horses: horses.map((h)=>({...h}))
+    };
+    persistReviews([rec, ...reviews]);
+    setSelectedReviewId(rec.id);
+    setSavedResultInput("");
+    setSavedReviewInput("");
+    flash("予想を未結果レースとして保存しました");
+  };
+
+  const openSavedRace = (r: ReviewRecord) => {
+    setSelectedReviewId(r.id);
+    setSavedResultInput(r.result || "");
+    setSavedReviewInput(r.reviewNote || "");
+  };
+
+  const registerSavedResult = () => {
+    if (!selectedReviewId) { flash("保存済みレースを選択してください"); return; }
+    if (parseResultNumbers(savedResultInput).length < 3) { flash("結果を1-4-7の形式で入力してください"); return; }
+    const target = reviews.find((r)=>r.id===selectedReviewId);
+    if (!target) { flash("保存済みレースが見つかりません"); return; }
+    const generated = automaticReviewText(savedResultInput, target.ranked || []);
+    const next = reviews.map((r)=>r.id===selectedReviewId ? {
+      ...r, result:savedResultInput.trim(), reviewNote:savedReviewInput.trim() || generated, updatedAt:new Date().toISOString()
+    } : r);
+    persistReviews(next);
+    setSavedReviewInput(savedReviewInput.trim() || generated);
+    flash("結果を登録し、AI回顧・学習へ反映しました");
+  };
+
+  const deleteSavedRace = (id: string) => {
+    if (!confirm("この保存レースを削除しますか？")) return;
+    persistReviews(reviews.filter((r)=>r.id!==id));
+    if (selectedReviewId===id) { setSelectedReviewId(null); setSavedResultInput(""); setSavedReviewInput(""); }
+    flash("保存レースを削除しました");
   };
 
   const clearReviews = () => {
-    if (!confirm("回顧データベースを全削除しますか？")) return;
-    setReviews([]); localStorage.removeItem("keiba:reviews"); flash("回顧データを削除しました");
+    if (!confirm("保存済みレースをすべて削除しますか？")) return;
+    setReviews([]); localStorage.removeItem("keiba:reviews"); flash("保存済みレースを削除しました");
   };
 
 
@@ -1339,22 +1382,43 @@ export default function KeibaYosouTool() {
         )}
 
         <div style={styles.reviewBox}>
-          <div style={styles.betTitle}>結果・回顧</div>
-          <div style={styles.reviewGrid}>
-            <input className="kbt-input" style={styles.raceNameInput} value={result} onChange={(e) => setResult(e.target.value)} placeholder="結果（例：1-4-7）" />
-            <textarea className="kbt-input" style={styles.reviewTextarea} value={reviewNote} onChange={(e) => setReviewNote(e.target.value)} placeholder="展開、見落とし、次回の修正点を記録" rows={3} />
-          </div>
-          <div style={styles.autoReviewBox}><strong>AI自動回顧</strong><br/>{autoReview}</div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
-            <button style={styles.ghostBtn} onClick={saveReview}>結果を回顧DBへ登録</button>
-            <button style={styles.ghostBtn} onClick={()=>setShowStats((v)=>!v)}>{showStats?"統計を閉じる":"統計を見る"}</button>
-          </div>
-          <div style={styles.betNote}>登録すると会場・距離別成績と自動学習へ反映されます。</div>
+          <div style={styles.betTitle}>予想を保存</div>
+          <div style={styles.betNote}>レース前は結果を入れずに保存します。レース終了後、下の保存済みレース一覧から結果を登録してください。</div>
+          <button style={{...styles.ghostBtn, marginTop:10}} onClick={savePrediction}>この予想を保存（未結果）</button>
+        </div>
+
+        <div style={styles.statsBox}>
+          <div style={styles.betTitle}>保存済みレース</div>
+          {reviews.length === 0 && <div style={styles.betNote}>まだ保存されたレースはありません。</div>}
+          {reviews.map((r) => {
+            const completed = parseResultNumbers(r.result).length >= 3;
+            const selected = selectedReviewId === r.id;
+            return (
+              <div key={r.id} style={{...styles.savedRaceCard, ...(selected ? styles.savedRaceSelected : {})}}>
+                <div style={styles.savedRaceHeader}>
+                  <button style={styles.savedRaceMain} onClick={()=>openSavedRace(r)}>
+                    <span><strong>{new Date(r.createdAt).toLocaleDateString("ja-JP")}　{r.track}{r.distance}m</strong><br/>{r.raceName || "名称未設定"}</span>
+                    <span style={completed ? styles.doneBadge : styles.pendingBadge}>{completed ? "✅ 回顧済" : "🟡 未結果"}</span>
+                  </button>
+                  <button style={styles.deleteBtn} onClick={()=>deleteSavedRace(r.id)}>削除</button>
+                </div>
+                {selected && (
+                  <div style={styles.savedResultEditor}>
+                    <input className="kbt-input" style={styles.raceNameInput} value={savedResultInput} onChange={(e)=>setSavedResultInput(e.target.value)} placeholder="結果（例：1-4-7）" />
+                    <div style={styles.autoReviewBox}><strong>AI自動回顧プレビュー</strong><br/>{automaticReviewText(savedResultInput, r.ranked || [])}</div>
+                    <textarea className="kbt-input" style={styles.reviewTextarea} value={savedReviewInput} onChange={(e)=>setSavedReviewInput(e.target.value)} placeholder="空欄ならAI自動回顧を保存。追記・修正もできます" rows={3} />
+                    <button style={styles.ghostBtn} onClick={registerSavedResult}>{completed ? "結果・回顧を更新" : "結果を登録して回顧"}</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button style={{...styles.ghostBtn,marginTop:10}} onClick={()=>setShowStats((v)=>!v)}>{showStats?"統計を閉じる":"統計を見る"}</button>
         </div>
 
         {showStats && (
           <div style={styles.statsBox}>
-            <div style={styles.betTitle}>地方競馬 回顧データベース</div>
+            <div style={styles.betTitle}>回顧済みレース統計</div>
             <div style={styles.statsGrid}>
               <div><strong>{track}{distance}m</strong><br/>登録 {stats.current.count}戦<br/>◎勝率 {stats.current.count?Math.round(stats.current.win/stats.current.count*100):0}%<br/>上位2頭内で1・2着 {stats.current.count?Math.round(stats.current.exacta/stats.current.count*100):0}%<br/>印5頭内三着内網羅 {stats.current.count?Math.round(stats.current.trio/stats.current.count*100):0}%</div>
               <div><strong>全会場</strong><br/>登録 {stats.all.count}戦<br/>◎勝率 {stats.all.count?Math.round(stats.all.win/stats.all.count*100):0}%<br/>危険人気消し成功 {stats.all.dangerTotal?Math.round(stats.all.dangerHit/stats.all.dangerTotal*100):0}%<br/>保存上限 500戦</div>
@@ -1363,7 +1427,6 @@ export default function KeibaYosouTool() {
               <strong>会場・距離別</strong>
               {trackDistanceStats.map(([key,v])=><div key={key} style={styles.historyRow}><span>{key}　{v.count}戦</span><strong>◎{Math.round(v.win/v.count*100)}% ／ 印内{Math.round(v.trio/v.count*100)}%</strong></div>)}
             </div>}
-            {reviews.slice(0,5).map((r)=><div key={r.id} style={styles.historyRow}><span>{new Date(r.createdAt).toLocaleDateString("ja-JP")} {r.track}{r.distance}m {r.raceName}</span><strong>{r.result}</strong></div>)}
             <div style={styles.backupBox}>
               <strong>バックアップ・復元</strong>
               <div style={styles.backupButtons}>
@@ -1473,6 +1536,14 @@ const styles: Record<string, CSSProperties> = {
   trackProfile: { display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "10px 12px", background: "#1C1A17", color: "#EFE9DA", marginBottom: 10, fontSize: 12 },
   reviewBox: { border: "2px solid #1C1A17", background: "#fff", padding: 14, marginTop: 18, marginBottom: 16 },
   reviewGrid: { display: "grid", gridTemplateColumns: "minmax(180px, 0.4fr) minmax(260px, 1fr)", gap: 10, marginTop: 10 },
+  savedRaceCard: { border: "1px solid #D9D2C2", marginTop: 10, background: "#fff" },
+  savedRaceSelected: { border: "2px solid #9B7B2F" },
+  savedRaceHeader: { display: "flex", alignItems: "stretch" },
+  savedRaceMain: { flex: 1, border: 0, background: "transparent", padding: 12, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, cursor: "pointer", color: "#1C1A17", fontFamily: "inherit" },
+  pendingBadge: { whiteSpace: "nowrap", fontWeight: 700, color: "#7A5700", background: "#FFF1B8", padding: "4px 8px", fontSize: 11 },
+  doneBadge: { whiteSpace: "nowrap", fontWeight: 700, color: "#245B34", background: "#DFF2E3", padding: "4px 8px", fontSize: 11 },
+  deleteBtn: { border: 0, borderLeft: "1px solid #E1DBCD", background: "#FAF7F0", padding: "0 12px", cursor: "pointer", color: "#8A302A", fontFamily: "inherit" },
+  savedResultEditor: { borderTop: "1px solid #E1DBCD", padding: 12, display: "grid", gap: 10 },
   reviewTextarea: { width: "100%", padding: 10, border: "1px solid #1C1A17", resize: "vertical", fontFamily: "inherit" },
   weightBar: {
     display: "flex",

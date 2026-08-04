@@ -876,6 +876,34 @@ export default function KeibaYosouTool() {
     flash(`${parsed.length}頭を取り込みました`);
   };
 
+  const clearFourSourceTexts = () => {
+    if (!(raceCardText || standardIndexText || recentIndexText || paceText)) {
+      flash("クリアする貼り付けテキストがありません");
+      return;
+    }
+    if (!confirm("4つの入力テキストをすべて消しますか？")) return;
+    setRaceCardText("");
+    setStandardIndexText("");
+    setRecentIndexText("");
+    setPaceText("");
+    flash("4つの入力テキストを一括クリアしました");
+  };
+
+  const resetCurrentRace = () => {
+    if (!confirm("現在のレース入力・解析結果・馬一覧をリセットしますか？\n保存済みレースと回顧DBは消えません。")) return;
+    setRaceName("");
+    setRaceClass("");
+    setResult("");
+    setReviewNote("");
+    setBulkText("");
+    setRaceCardText("");
+    setStandardIndexText("");
+    setRecentIndexText("");
+    setPaceText("");
+    setHorses([emptyHorse(), emptyHorse(), emptyHorse()]);
+    flash("現在のレースをリセットしました");
+  };
+
   const applyFourSources = () => {
     const parsed = mergeFourSources(raceCardText, standardIndexText, recentIndexText, paceText, track, distance);
     if (parsed.length === 0) {
@@ -1169,7 +1197,14 @@ export default function KeibaYosouTool() {
               <textarea className="kbt-input" style={styles.bulkTextarea} value={recentIndexText} onChange={(e) => setRecentIndexText(e.target.value)} placeholder="各馬の近5走タイム指数を貼り付け" rows={7} />
               <label style={styles.pasteLabel}>④ 展開予測</label>
               <textarea className="kbt-input" style={styles.bulkTextarea} value={paceText} onChange={(e) => setPaceText(e.target.value)} placeholder={"逃げ 1 ...\n先行 4 ...\n差し 2 3 ...\n追込 5 ..."} rows={4} />
-              <button style={styles.primaryBtn} onClick={applyFourSources}>4種類を統合して置き換え</button>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button style={styles.primaryBtn} onClick={applyFourSources}>4種類を統合して置き換え</button>
+                <button style={styles.ghostBtn} onClick={clearFourSourceTexts}>一括クリア</button>
+                <button style={styles.ghostBtn} onClick={resetCurrentRace}>レースをリセット</button>
+              </div>
+              <p style={{ ...styles.bulkHint, marginTop: 8, marginBottom: 0 }}>
+                「一括クリア」は4つの貼り付け欄だけ消去。「レースをリセット」は現在の入力・解析結果・馬一覧を消去します（保存済みレース／回顧DBは残ります）。
+              </p>
               <details style={{ marginTop: 12 }}>
                 <summary style={{ cursor: "pointer", fontSize: 13 }}>旧形式の1行1頭入力を使う</summary>
                 <textarea className="kbt-input" style={{ ...styles.bulkTextarea, marginTop: 8 }} value={bulkText} onChange={(e) => setBulkText(e.target.value)} placeholder="1  馬名  先行  85  80  78  75  5.5  3" rows={4} />

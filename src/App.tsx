@@ -766,10 +766,33 @@ export default function KeibaYosouTool() {
     return { all:calc(completed), current:calc(subset) };
   }, [reviews, track, distance]);
 
+  const compactHorse = (h: any) => ({
+    id: h.id || crypto.randomUUID(), name: h.name || "", waku: h.waku || "", ashimuki: h.ashimuki || "差し",
+    saikou: h.saikou ?? "", kinsou: h.kinsou ?? "", kyori: h.kyori ?? "", course: h.course ?? "",
+    odds: h.odds ?? "", ninki: h.ninki ?? "", danger: !!h.danger, abilityScore: h.abilityScore ?? h.score ?? 0
+  });
+
+  const compactReview = (r: ReviewRecord): ReviewRecord => ({
+    id: r.id, raceName: r.raceName, track: r.track, distance: r.distance, raceClass: r.raceClass, baba: r.baba,
+    result: r.result || "", reviewNote: r.reviewNote || "", createdAt: r.createdAt, updatedAt: r.updatedAt,
+    ranked: (r.ranked || []).map(compactHorse), horses: (r.horses || []).map(compactHorse),
+  });
+
   const persistReviews = (next: ReviewRecord[]) => {
-    const limited = next.slice(0, 500);
-    setReviews(limited);
-    localStorage.setItem("keiba:reviews", JSON.stringify(limited));
+    // 保存容量を圧迫しないよう、AIコメント等の再計算可能な情報は保存しない。
+    // 既存データも次回保存時に軽量化されるので、過去レースは消さずに容量だけ削減できる。
+    let limited = next.slice(0, 500).map(compactReview);
+    try {
+      localStorage.setItem("keiba:reviews", JSON.stringify(limited));
+      setReviews(limited);
+      return true;
+    } catch (e) {
+      console.error(e);
+      // Safari/iPhone の localStorage 上限に達した場合は古いデータを勝手に消さない。
+      // 保存失敗を明示して、既存DBを保持する。
+      flash("保存容量が不足しています。回顧DBをJSON書き出ししてから整理してください");
+      return false;
+    }
   };
 
   const savePrediction = () => {
@@ -780,7 +803,7 @@ export default function KeibaYosouTool() {
       result: "", reviewNote: "", createdAt: new Date().toISOString(),
       ranked: ranked.map((h)=>({...h})), horses: horses.map((h)=>({...h}))
     };
-    persistReviews([rec, ...reviews]);
+    if (!persistReviews([rec, ...reviews])) return;
     setSelectedReviewId(rec.id);
     setSavedResultInput("");
     setSavedReviewInput("");
@@ -802,14 +825,14 @@ export default function KeibaYosouTool() {
     const next = reviews.map((r)=>r.id===selectedReviewId ? {
       ...r, result:savedResultInput.trim(), reviewNote:savedReviewInput.trim() || generated, updatedAt:new Date().toISOString()
     } : r);
-    persistReviews(next);
+    if (!persistReviews(next)) return;
     setSavedReviewInput(savedReviewInput.trim() || generated);
     flash("結果を登録し、AI回顧・学習へ反映しました");
   };
 
   const deleteSavedRace = (id: string) => {
     if (!confirm("この保存レースを削除しますか？")) return;
-    persistReviews(reviews.filter((r)=>r.id!==id));
+    if (!persistReviews(reviews.filter((r)=>r.id!==id))) return;
     if (selectedReviewId===id) { setSelectedReviewId(null); setSavedResultInput(""); setSavedReviewInput(""); }
     flash("保存レースを削除しました");
   };
@@ -850,8 +873,7 @@ export default function KeibaYosouTool() {
         const base=replace ? [] : reviews;
         const byId=new Map([...imported,...base].map((r)=>[r.id,r]));
         const next=Array.from(byId.values()).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,500);
-        setReviews(next); localStorage.setItem("keiba:reviews",JSON.stringify(next));
-        flash(`${imported.length}件を復元しました`);
+        if (persistReviews(next)) flash(`${imported.length}件を復元しました`);
       } catch (e) { console.error(e); flash("ファイルの読み込みに失敗しました"); }
     };
     input.click();
@@ -935,6 +957,17 @@ export default function KeibaYosouTool() {
       setExportText(payload);
       setShowExport(true);
       flash("自動保存に失敗したため、バックアップ用テキストを表示しました");
+    }
+  };
+
+  const copyExportText = async () => {
+    if (!exportText) { flash("コピーするデータがありません"); return; }
+    try {
+      await navigator.clipboard.writeText(exportText);
+      flash("バックアップテキストをコピーしました");
+    } catch {
+      const ta = document.getElementById("keiba-export-text") as HTMLTextAreaElement | null;
+      if (ta) { ta.focus(); ta.select(); try { document.execCommand("copy"); flash("バックアップテキストをコピーしました"); } catch { flash("全選択したので、コピーを押してください"); } }
     }
   };
 
@@ -1068,11 +1101,13 @@ export default function KeibaYosouTool() {
             <textarea
               className="kbt-input"
               style={styles.bulkTextarea}
+              id="keiba-export-text"
               value={exportText}
               readOnly
               rows={4}
               onFocus={(e) => e.target.select()}
             />
+            <button style={styles.ghostBtn} onClick={copyExportText}>コピー</button>
           </div>
         )}
 

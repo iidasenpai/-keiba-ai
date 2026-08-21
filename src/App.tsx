@@ -79,29 +79,56 @@ function parseResultNumbers(result: string) {
 }
 
 function learnedAxisAdjustments(reviews: ReviewRecord[], track: string, distance: string) {
-  const matching = reviews.filter((r) => r.track === track && r.distance === distance && parseResultNumbers(r.result).length);
-  if (matching.length < 3) return { saikou: 0, kinsou: 0, kyori: 0, course: 0, count: matching.length };
-  const sums = { saikou: 0, kinsou: 0, kyori: 0, course: 0 };
-  let usable = 0;
-  for (const r of matching) {
-    const winnerNo = parseResultNumbers(r.result)[0];
-    const winner = r.horses?.find((h) => String(h.waku) === String(winnerNo));
-    const field = (r.horses ?? []).filter((h) => h.name);
-    if (!winner || field.length < 2) continue;
-    for (const key of Object.keys(sums)) {
-      const w = Number(winner[key]);
-      const vals = field.map((h) => Number(h[key])).filter(Number.isFinite);
-      if (!Number.isFinite(w) || !vals.length) continue;
-      const avg = vals.reduce((a,b)=>a+b,0)/vals.length;
-      sums[key] += (w-avg)/100;
-    }
-    usable++;
-  }
-  const cap=(v)=>Math.max(-0.04,Math.min(0.04,v));
-  if (!usable) return { saikou:0, kinsou:0, kyori:0, course:0, count:matching.length };
-  return { saikou:cap(sums.saikou/usable), kinsou:cap(sums.kinsou/usable), kyori:cap(sums.kyori/usable), course:cap(sums.course/usable), count:matching.length };
-}
+  const completed = reviews.filter((r) => parseResultNumbers(r.result).length >= 3);
+  const matching = completed.filter((r) => r.track === track && r.distance === distance);
+  const empty = { saikou: 0, kinsou: 0, kyori: 0, course: 0, count: matching.length, strength: 0 };
 
+  // 少数レースでコース特性を決め打ちすると過学習しやすい。10戦までは基本ロジックを維持し、
+  // 10〜20戦は弱く、20戦以降で徐々に学習結果を強く反映する。
+  if (matching.length < 10) return empty;
+
+  const learnFrom = (rows: ReviewRecord[]) => {
+    const sums = { saikou: 0, kinsou: 0, kyori: 0, course: 0 };
+    let usable = 0;
+    for (const r of rows) {
+      const resultNos = parseResultNumbers(r.result);
+      const field = (r.horses ?? []).filter((h) => h.name);
+      if (field.length < 4 || resultNos.length < 3) continue;
+      const podium = resultNos.slice(0, 3)
+        .map((no, i) => ({ h: field.find((x) => String(x.waku) === String(no)), w: [1, 0.60, 0.35][i] }))
+        .filter((x) => x.h);
+      if (!podium.length) continue;
+      for (const key of Object.keys(sums)) {
+        const vals = field.map((h) => Number(h[key])).filter(Number.isFinite);
+        if (vals.length < 4) continue;
+        const avg = vals.reduce((a,b)=>a+b,0)/vals.length;
+        let weighted = 0, wsum = 0;
+        for (const x of podium) {
+          const v = Number(x.h[key]);
+          if (Number.isFinite(v)) { weighted += v * x.w; wsum += x.w; }
+        }
+        if (wsum) sums[key] += ((weighted / wsum) - avg) / 100;
+      }
+      usable++;
+    }
+    if (!usable) return null;
+    return Object.fromEntries(Object.entries(sums).map(([k,v]) => [k, v / usable]));
+  };
+
+  const local = learnFrom(matching);
+  if (!local) return empty;
+  // 全体傾向を少量混ぜることで、特定会場・距離の偶然の連続結果への追従を抑える。
+  const global = learnFrom(completed) ?? { saikou:0, kinsou:0, kyori:0, course:0 };
+  const strength = Math.min(1, Math.max(0, (matching.length - 8) / 22));
+  const localShare = Math.min(0.9, 0.55 + matching.length / 100);
+  const cap = 0.035; // 1軸±3.5ptまで。既存の会場・距離バイアスを壊さない。
+  const out:any = { count: matching.length, strength };
+  for (const key of ["saikou","kinsou","kyori","course"]) {
+    const blended = local[key] * localShare + global[key] * (1 - localShare);
+    out[key] = Math.max(-cap, Math.min(cap, blended * strength));
+  }
+  return out;
+}
 function normalizeWeights(raw: any) {
   const keys=["saikou","kinsou","kyori","course"];
   const clipped:any={};
@@ -680,7 +707,7 @@ export default function KeibaYosouTool() {
   const [savedResultInput, setSavedResultInput] = useState("");
   const [savedReviewInput, setSavedReviewInput] = useState("");
 
-  const learned = useMemo(() => autoLearning ? learnedAxisAdjustments(reviews, track, distance) : { saikou:0, kinsou:0, kyori:0, course:0, count:0 }, [reviews, track, distance, autoLearning]);
+  const learned = useMemo(() => autoLearning ? learnedAxisAdjustments(reviews, track, distance) : { saikou:0, kinsou:0, kyori:0, course:0, count:0, strength:0 }, [reviews, track, distance, autoLearning]);
   const weights = useMemo(() => ({ ...trackAdjustedWeights(track, baba, distance, learned), __distance: distance }), [track, baba, distance, learned]);
   const effStrength = correctionEnabled ? correctionStrength : 0;
 
@@ -1166,7 +1193,7 @@ export default function KeibaYosouTool() {
             回顧から自動学習
           </label>
           <span>同条件 {learned.count}戦</span>
-          {learned.count >= 3 ? <span>学習補正：最高{learned.saikou>=0?"+":""}{learned.saikou.toFixed(3)}／近走{learned.kinsou>=0?"+":""}{learned.kinsou.toFixed(3)}／距離{learned.kyori>=0?"+":""}{learned.kyori.toFixed(3)}／コース{learned.course>=0?"+":""}{learned.course.toFixed(3)}</span> : <span>3戦以上で自動補正を開始</span>}
+          {learned.count >= 10 ? <span>学習補正（{learned.count}戦・反映{Math.round((learned.strength ?? 0)*100)}%）：最高{learned.saikou>=0?"+":""}{learned.saikou.toFixed(3)}／近走{learned.kinsou>=0?"+":""}{learned.kinsou.toFixed(3)}／距離{learned.kyori>=0?"+":""}{learned.kyori.toFixed(3)}／コース{learned.course>=0?"+":""}{learned.course.toFixed(3)}</span> : <span>10戦以上で自動補正を開始（現在{learned.count}戦）</span>}
         </div>
 
         {/* Odds correction */}

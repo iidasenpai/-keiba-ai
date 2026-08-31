@@ -628,8 +628,33 @@ export default function NARPredictionTool() {
     const clean = (v) => String(v ?? "").replace(/\*/g, "");
 
     if (!recentMode) {
-      // 標準テンプレ: 1 馬名 35 22 ... 牡4 53.0 騎手 46.5 11
-      // 旧形式（馬番だけの行→次行にデータ）にも対応する。
+      // 標準テンプレ（地方競馬）
+      // 馬番 / 馬名 / 最高 / 5走平均 / 距離 / コース / 3走 / 2走 / 前走 / 性齢 / 斤量 / 騎手 / オッズ / 人気
+      // 例: 1 トウキョーバサラ 35 22 39 40 29 27 15 牝5 51.0 杉山海波 14.4 5
+      // 「10*」の * や負数も許容。ヘッダーや「--」が混ざっても無視する。
+      const directRowRe = /^(\d{1,2})\s+(?:--\s+|－\s+|-\s+)?([^\s]+)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+(-?\d+(?:\.\d+)?\*?)\s+((?:牡|牝|セ)\d{1,2})\s+([0-9]+(?:\.[0-9]+)?)\s+(.+?)\s+([0-9]+(?:\.[0-9]+)?)\s+(\d{1,2})$/;
+      const directlyParsed = new Set();
+      for (const line of lines) {
+        const m = line.match(directRowRe);
+        if (!m) continue;
+        const [, umaban, name, best, avg5, dist, course, r3, r2, r1, sex, weight, jockey, odds, ninki] = m;
+        const h = ensureHorse(umaban, name);
+        h.best = clean(best);
+        h.avg5 = clean(avg5);
+        h.dist = clean(dist);
+        h.course = clean(course);
+        h.r3 = clean(r3);
+        h.r2 = clean(r2);
+        h.r1 = clean(r1);
+        h.sex = sex || h.sex;
+        h.weight = weight || h.weight;
+        h.jockey = String(jockey || "").replace(/^[☆◇▲△★]/, "").trim() || h.jockey;
+        h.odds = odds || h.odds;
+        h.ninki = ninki || h.ninki;
+        directlyParsed.add(umaban);
+      }
+
+      // 改行崩れした旧形式（馬番だけの行→次行にデータ）にも対応する。
       const candidates = [];
       for (let i = 0; i < lines.length; i += 1) {
         const line = lines[i];
@@ -645,7 +670,7 @@ export default function NARPredictionTool() {
       for (const row of candidates) {
         const cols = row.split(/\s+/);
         const umaban = cols[0];
-        if (!/^\d{1,2}$/.test(umaban) || seen.has(umaban)) continue;
+        if (!/^\d{1,2}$/.test(umaban) || seen.has(umaban) || directlyParsed.has(umaban)) continue;
         const sexIdx = cols.findIndex((v, idx) => idx > 2 && /^(牡|牝|セ)\d{1,2}$/.test(v));
         if (sexIdx < 5) continue;
         const name = cols[1];

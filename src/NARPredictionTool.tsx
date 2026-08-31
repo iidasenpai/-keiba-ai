@@ -2329,8 +2329,8 @@ export default function NARPredictionTool() {
   const currentRaceSnapshot = (id: string = crypto.randomUUID(), previous: any = {}): any => ({
     ...previous,
     id,
-    title: raceName.trim() || `${track}${raceNo}R ${distance || ""}m`.trim(),
-    raceName,
+    title: `${track}${raceNo}R ${distance || ""}m`.trim(),
+    raceName: "",
     raceNo,
     track,
     surface,
@@ -2375,8 +2375,9 @@ export default function NARPredictionTool() {
   };
 
   const loadSavedRace = (race: any, forResult = false) => {
-    setRaceName(race.raceName || "");
-    setRaceNo(String(race.raceNo || "1"));
+    setRaceName("");
+    const legacyRaceNo = String(race.raceNo || race.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1";
+    setRaceNo(legacyRaceNo);
     setTrack(race.track || "大井");
     setSurface("ダート");
     setDistance(race.distance || "");
@@ -2445,7 +2446,7 @@ export default function NARPredictionTool() {
         setHistoryCount((n)=>n+1);
         setLearningHistory((prev)=>[{
           raceId,
-          title: activeRecord?.title || raceName || `${track}${raceNo}R ${distance}m`,
+          title: `${track}${raceNo}R ${distance}m`,
           at:new Date().toISOString(),
           changes,
         },...prev].slice(0,100));
@@ -2484,7 +2485,7 @@ export default function NARPredictionTool() {
       const res=learnFromRace(r.horses||[], r.paceType||"M", next);
       if(Object.keys(res.changes).length){
         next=res.next; learnedRaces++;
-        history.unshift({raceId:r.id,title:r.title||"保存レース",at:new Date().toISOString(),changes:res.changes,relearned:true});
+        history.unshift({raceId:r.id,title:`${r.track || ""}${String(r.raceNo || r.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1"}R ${r.distance || ""}m`.trim(),at:new Date().toISOString(),changes:res.changes,relearned:true});
         updatedIds.add(r.id);
       }
     });
@@ -2736,7 +2737,7 @@ export default function NARPredictionTool() {
                 <div key={race.id} className="rounded-lg border border-slate-200 p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-black text-slate-800">{race.title || "名称未設定のレース"}</div>
+                      <div className="truncate text-sm font-black text-slate-800">{`${race.track || ""}${String(race.raceNo || race.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1"}R ${race.distance || ""}m`.trim()}</div>
                       <div className="mt-0.5 text-[10px] text-slate-500">{race.track}・{race.distance || ""}m・{race.going}／{race.horses?.length || 0}頭</div>
                       <div className="mt-1 text-[10px] text-slate-400">保存: {race.savedAt ? new Date(race.savedAt).toLocaleString("ja-JP") : "-"}</div>
                     </div>

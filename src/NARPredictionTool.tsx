@@ -2068,6 +2068,80 @@ export default function NARPredictionTool() {
     return map;
   }, [savedRaces]);
 
+  // ---- 会場×距離ごとの専用学習 ----
+  // 保存済み結果は一切書き換えず、完了レースから毎回読み取り専用で再計算する。
+  // サンプルが少ない条件は全体学習を優先し、10Rで50%、20R以上で80%〜100%まで専用値を強める。
+  const courseDistanceLearning = useMemo(() => {
+    const byCondition = new Map();
+    const completed = savedRaces.filter((r:any) => r.status === "completed" && (r.horses || []).filter((h:any) => {
+      const f = num(h.finish); return f !== null && f >= 1 && f <= 3;
+    }).length === 3);
+
+    const mean = (xs:number[]) => xs.length ? xs.reduce((a,b)=>a+b,0) / xs.length : 0;
+    const localDelta = (topValues:number[], otherValues:number[]) => {
+      if (!topValues.length || !otherValues.length) return 0;
+      const a = mean(topValues), b = mean(otherValues);
+      const all = [...topValues, ...otherValues];
+      const mu = mean(all);
+      const variance = all.reduce((sum,v)=>sum+(v-mu)*(v-mu),0) / Math.max(1, all.length - 1);
+      const sd = Math.sqrt(variance);
+      const effect = Math.abs(a-b) / Math.max(sd, 4);
+      if (effect < 0.18) return 0;
+      const magnitude = clamp(0.01 + effect * 0.012, 0.01, 0.04);
+      return a > b ? magnitude : -magnitude;
+    };
+
+    completed.forEach((r:any) => {
+      const key = `${r.track}|${r.distance}`;
+      const current = byCondition.get(key) || { n:0, learned:{...DEFAULT_LEARNED} };
+      const horses = (r.horses || []).map((h:any) => ({...h}));
+      const scored = horses.filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const predRank = new Map(scored.map((h:any,i:number)=>[String(h.id || h.umaban), i+1]));
+      const top3 = horses.filter((h:any)=>{ const f=num(h.finish); return f!==null && f>=1 && f<=3; });
+      const topIds = new Set(top3.map((h:any)=>String(h.id || h.umaban)));
+      const others = horses.filter((h:any)=>!topIds.has(String(h.id || h.umaban)));
+      if (top3.length < 3 || !others.length) return;
+
+      const getters:any = {
+        training: (h:any) => (num(h.trainingScore) ?? GRADE_TO_TRAINING_100[h.training] ?? 70) - 65,
+        comment: (h:any) => scoreCommentText(h.comment || "") - 55,
+        value: (h:any) => { const p=num(h.ninki); const rank=predRank.get(String(h.id || h.umaban)); return p===null||!rank ? 0 : p-Number(rank); },
+        pace: (h:any) => STYLE_PACE_SCORE[r.paceType || "M"]?.[h.runningStyle] ?? 0,
+        ground: (h:any) => (num(h.groundFit) ?? 50) - 50,
+        classFit: (h:any) => (num(h.classFit) ?? 50) - 50,
+        jockey: (h:any) => (num(h.jockeyIndex) ?? 50) - 50,
+        gate: (h:any) => (num(h.gateFit) ?? 50) - 50,
+        body: (h:any) => { const v=bodyChangeNum(h.bodyChange); return v===null ? 0 : -Math.abs(v); },
+        pedigree: (h:any) => (num(h.pedigreeFit) ?? 50) - 50,
+        condition: (h:any) => (num(h.condition) ?? 50) - 50,
+      };
+      const next = {...current.learned};
+      Object.entries(getters).forEach(([factor,getter]:any) => {
+        const tv = top3.map((h:any)=>Number(getter(h))).filter(Number.isFinite);
+        const ov = others.map((h:any)=>Number(getter(h))).filter(Number.isFinite);
+        const d = localDelta(tv, ov);
+        if (!d) return;
+        next[factor] = Number(clamp(Number(next[factor] ?? 1) + d, 0.65, 1.35).toFixed(4));
+      });
+      byCondition.set(key, { n: current.n + 1, learned: next });
+    });
+    return byCondition;
+  }, [savedRaces]);
+
+  const currentCourseLearning = useMemo(() => {
+    const local = courseDistanceLearning.get(`${track}|${distance}`) || { n:0, learned:{...DEFAULT_LEARNED} };
+    const strength = sampleStrength(local.n);
+    const effective:any = {};
+    Object.keys(DEFAULT_LEARNED).forEach((k) => {
+      const g = Number(learned[k] ?? 1);
+      const l = Number(local.learned[k] ?? 1);
+      effective[k] = Number((g * (1 - strength) + l * strength).toFixed(4));
+    });
+    return { n: local.n, strength, local: local.learned, effective };
+  }, [courseDistanceLearning, track, distance, learned]);
+
+  const effectiveLearned = currentCourseLearning.effective;
+
   const recentConditionMeta = (horse) => {
     const runs = Array.isArray(horse.recentRuns) ? horse.recentRuns.slice(0,5) : [];
     const targetDistance = Number(distance) || 0;
@@ -2174,7 +2248,7 @@ export default function NARPredictionTool() {
         learnedJockey = { adj: fallback.adj * 0.65, n: fallback.n };
       }
       const manualJockeyAdj = h._jockeyIndex === null ? 0 : clamp((h._jockeyIndex - 50) / 28, -1.5, 1.5);
-      const jockeyAdj = (learnedJockey.adj + manualJockeyAdj) * (learningOn ? learned.jockey : 1);
+      const jockeyAdj = (learnedJockey.adj + manualJockeyAdj) * (learningOn ? effectiveLearned.jockey : 1);
 
       // 会場×距離の脚質傾向も結果から学習。脚質データが無いレースでは補正ゼロ。
       let styleCourseAdj = 0;
@@ -2193,8 +2267,8 @@ export default function NARPredictionTool() {
       const hasComment = canUseComments && !!String(h.comment || "").trim();
       const training100 = hasTraining ? (num(h.trainingScore) ?? GRADE_TO_TRAINING_100[h.training] ?? 70) : null;
       const comment100 = hasComment ? scoreCommentText(h.comment || "") : null;
-      const trainingAdj = training100 === null ? 0 : clamp((training100 - 70) / 7, -2.8, 3.2) * (learningOn ? learned.training : 1);
-      const commentAdj = comment100 === null ? 0 : clamp((comment100 - 55) / 10, -2.2, 2.8) * (learningOn ? learned.comment : 1);
+      const trainingAdj = training100 === null ? 0 : clamp((training100 - 70) / 7, -2.8, 3.2) * (learningOn ? effectiveLearned.training : 1);
+      const commentAdj = comment100 === null ? 0 : clamp((comment100 - 55) / 10, -2.2, 2.8) * (learningOn ? effectiveLearned.comment : 1);
       let layoffAdj = 0;
       if (hasComment && /久々|休み明け|放牧明け/.test(String(h.comment || ""))) {
         layoffAdj = /好仕上がり|仕上がり.*(?:良|順調)|状態.*上向/.test(String(h.comment || "")) ? 0.15 : -0.45;
@@ -2204,7 +2278,7 @@ export default function NARPredictionTool() {
       if (h._bodyChange !== null) {
         const abs = Math.abs(h._bodyChange);
         bodyAdj = abs <= 6 ? 0.15 : abs <= 12 ? -0.20 : abs <= 18 ? -0.65 : -1.10;
-        bodyAdj *= learningOn ? learned.body : 1;
+        bodyAdj *= learningOn ? effectiveLearned.body : 1;
       }
 
       // 近走内容等は補助評価。タイム指数を上回らないよう最大でも小幅補正に留める。
@@ -2238,7 +2312,7 @@ export default function NARPredictionTool() {
         _trainingScore:training100, _commentScore:comment100, _commentAdj:commentAdj, _contextAdj:contextAdj, _finalScore:finalScore,
       };
     });
-  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning]);
+  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned]);
 
   const ranked = useMemo(() => {
     const withScore = computed.filter((h) => h._finalScore !== null);
@@ -2748,6 +2822,14 @@ export default function NARPredictionTool() {
         <div className="mt-2 flex flex-wrap items-center gap-2"><button onClick={relearnAllCompleted} className="rounded bg-violet-700 px-3 py-1.5 text-[10px] font-black text-white">既存結果から全再学習</button><span className="text-[10px] text-gray-500">1〜3着だけで、上位3頭とその他を比較。差が小さい項目は動かしません。</span></div>
         {learningHistory.length>0 && <div className="mt-2 rounded bg-violet-50 p-2 text-[10px] text-violet-900"><div className="font-black">直近の学習変更</div><div className="mt-1">{Object.entries(learningHistory[0].changes||{}).map(([k,v]:any)=>`${k} ${v>0?"+":""}${Number(v).toFixed(3)}`).join(" / ") || "変更なし"}</div></div>}
         <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-gray-600">{Object.entries(learned).map(([k,v])=><span key={k} className="rounded bg-gray-100 px-2 py-1">{k}: {Number(v).toFixed(2)}</span>)}</div>
+        <div className="mt-2 rounded border border-indigo-200 bg-indigo-50 p-2 text-[10px] text-indigo-950">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-black">会場×距離専用学習：{track} {distance || "-"}m</span>
+            <span className="font-bold">{currentCourseLearning.n}R / 専用反映 {Math.round(currentCourseLearning.strength*100)}%</span>
+          </div>
+          <div className="mt-1 text-indigo-700">0〜4Rは全体値のみ、5〜9Rは20%、10〜19Rは50%、20R以上は80%〜100%で専用値をブレンド。</div>
+          <div className="mt-2 flex flex-wrap gap-1">{Object.entries(currentCourseLearning.effective).map(([k,v]:any)=><span key={k} className="rounded bg-white px-2 py-1">{k}: {Number(v).toFixed(2)}</span>)}</div>
+        </div>
       </div>
 
       <div className="mx-3 mt-3 grid gap-3 md:grid-cols-2">

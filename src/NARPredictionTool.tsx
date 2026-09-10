@@ -2142,10 +2142,15 @@ export default function NARPredictionTool() {
 
   const effectiveLearned = currentCourseLearning.effective;
 
+  const resultTop3Of = (race:any) => (race?.horses||[])
+    .filter((h:any)=>{ const f=num(h.finish); return f!==null && f>=1 && f<=3; })
+    .sort((a:any,b:any)=>num(a.finish)-num(b.finish));
+
   // ---- 中央転入馬の専用学習 ----
   // 保存済みレースは変更せず、過去結果から「中央転入後の何戦目か」ごとのズレだけを読み取り学習する。
   // 1戦目=地方実績0、2戦目=地方1走、3戦目=地方2走。4戦目以降は通常の地方馬ロジックへ移行。
   const centralTransferLearning = useMemo(() => {
+    try {
     const global = new Map();
     const exact = new Map();
     const expectedTop3 = (rank) => {
@@ -2187,6 +2192,15 @@ export default function NARPredictionTool() {
       return { adj: statAdj(g), n:e?.n || 0, globalN:g?.n || 0 };
     };
     return { global, exact, score };
+
+    } catch (e) {
+      console.warn("centralTransferLearning fallback", e);
+      return {
+        global: new Map(),
+        exact: new Map(),
+        score: (_trackName:any, _dist:any, _stage:any) => ({ adj:0, n:0, globalN:0 }),
+      };
+    }
   }, [savedRaces]);
 
   const recentConditionMeta = (horse) => {
@@ -2500,10 +2514,6 @@ export default function NARPredictionTool() {
     });
     return {next,changes};
   };
-
-  const resultTop3Of = (race:any) => (race?.horses||[])
-    .filter((h:any)=>{ const f=num(h.finish); return f!==null && f>=1 && f<=3; })
-    .sort((a:any,b:any)=>num(a.finish)-num(b.finish));
 
   const learningSummary = useMemo(() => {
     const completed = savedRaces.filter((r)=>r.status === "completed");

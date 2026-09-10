@@ -2142,13 +2142,64 @@ export default function NARPredictionTool() {
 
   const effectiveLearned = currentCourseLearning.effective;
 
+  // ---- 中央転入馬の専用学習 ----
+  // 保存済みレースは変更せず、過去結果から「中央転入後の何戦目か」ごとのズレだけを読み取り学習する。
+  // 1戦目=地方実績0、2戦目=地方1走、3戦目=地方2走。4戦目以降は通常の地方馬ロジックへ移行。
+  const centralTransferLearning = useMemo(() => {
+    const global = new Map();
+    const exact = new Map();
+    const expectedTop3 = (rank) => {
+      const table = [0,0.56,0.46,0.37,0.29,0.23,0.18,0.14,0.11,0.09,0.075,0.06,0.05,0.04,0.03,0.025];
+      return table[Math.min(15, Math.max(1, Number(rank)||15))] ?? 0.025;
+    };
+    const add = (map, key, residual) => {
+      const st = map.get(key) || { n:0, sum:0 };
+      st.n += 1; st.sum += residual; map.set(key, st);
+    };
+    savedRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3).forEach((r:any) => {
+      const scored = [...(r.horses || [])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const rankMap = new Map(scored.map((h:any,i:number)=>[String(h.id || h.umaban), i+1]));
+      (r.horses || []).forEach((h:any) => {
+        const runs = Array.isArray(h.recentRuns) ? h.recentRuns.slice(0,5) : [];
+        const jra = runs.filter((x:any)=>x?.source === "JRA" || JRA_TRACKS.includes(x?.track)).length;
+        const nar = runs.filter((x:any)=>!(x?.source === "JRA" || JRA_TRACKS.includes(x?.track))).length;
+        if (!jra || nar >= 3) return;
+        const stage = nar + 1;
+        const rank = rankMap.get(String(h.id || h.umaban));
+        if (!rank) return;
+        const f = num(h.finish);
+        const actual = f !== null && f >= 1 && f <= 3 ? 1 : 0;
+        const residual = (actual - expectedTop3(rank)) * 3.0;
+        add(global, String(stage), residual);
+        add(exact, `${r.track}|${r.distance}|${stage}`, residual);
+      });
+    });
+    const score = (trackName, dist, stage) => {
+      const e = exact.get(`${trackName}|${dist}|${stage}`);
+      const g = global.get(String(stage));
+      const statAdj = (st:any) => !st?.n ? 0 : clamp((st.sum / st.n) * sampleStrength(st.n), -2.5, 2.5);
+      if (e?.n >= 5) {
+        const ef = sampleStrength(e.n);
+        const exactAdj = statAdj(e);
+        const globalAdj = statAdj(g);
+        return { adj: exactAdj * ef + globalAdj * (1-ef), n:e.n, globalN:g?.n || 0 };
+      }
+      return { adj: statAdj(g), n:e?.n || 0, globalN:g?.n || 0 };
+    };
+    return { global, exact, score };
+  }, [savedRaces]);
+
   const recentConditionMeta = (horse) => {
     const runs = Array.isArray(horse.recentRuns) ? horse.recentRuns.slice(0,5) : [];
     const targetDistance = Number(distance) || 0;
     const recency = [1.45, 1.22, 1.05, 0.88, 0.72];
+    const jraCount = runs.filter((r) => r?.source === "JRA" || JRA_TRACKS.includes(r?.track)).length;
+    const narCount = runs.filter((r) => !(r?.source === "JRA" || JRA_TRACKS.includes(r?.track))).length;
+    const transferStage = jraCount >= 1 && narCount <= 2 ? narCount + 1 : (jraCount >= 1 ? 4 : 0);
     let totalW = 0, total = 0, sameCount = 0;
+    let jraW = 0, jraTotal = 0, narW = 0, narTotal = 0;
     const scores = [];
-    let jraCount = 0, narCount = 0, currentVenueRuns = 0;
+    let currentVenueRuns = 0;
     runs.forEach((r, i) => {
       const idx = num(r.index);
       if (idx === null) return;
@@ -2157,7 +2208,6 @@ export default function NARPredictionTool() {
       const sameDistance = targetDistance > 0 && rd === targetDistance;
       const nearDistance = targetDistance > 0 && Math.abs(rd - targetDistance) <= 200;
       const isJra = r.source === "JRA" || JRA_TRACKS.includes(r.track);
-      if (isJra) jraCount += 1; else narCount += 1;
       if (sameVenue) currentVenueRuns += 1;
       let cond = 0.68;
       if (sameVenue && sameDistance) { cond = 1.75; sameCount += 1; }
@@ -2165,20 +2215,29 @@ export default function NARPredictionTool() {
       else if (sameVenue) cond = 1.10;
       else if (!isJra && sameDistance) cond = 1.00;
       else if (!isJra && nearDistance) cond = 0.86;
-      else if (isJra && r.surface !== "芝" && sameDistance) cond = 0.92;
-      else if (isJra && r.surface !== "芝" && nearDistance) cond = 0.82;
-      else if (isJra && r.surface !== "芝") cond = 0.72;
-      else if (isJra && r.surface === "芝") cond = 0.52;
+      else if (isJra && r.surface !== "芝" && sameDistance) cond = 0.96;
+      else if (isJra && r.surface !== "芝" && nearDistance) cond = 0.86;
+      else if (isJra && r.surface !== "芝") cond = 0.70;
+      else if (isJra && r.surface === "芝" && sameDistance) cond = 0.48;
+      else if (isJra && r.surface === "芝") cond = 0.36;
+
+      // 転入2・3戦目は実際に走った地方レースを急速に重くし、中央指数の影響を段階的に下げる。
+      if (transferStage === 2) cond *= isJra ? 0.78 : 1.24;
+      else if (transferStage === 3) cond *= isJra ? 0.56 : 1.46;
+
       const w = recency[i] * cond;
       total += idx * w; totalW += w; scores.push(idx);
+      if (isJra) { jraTotal += idx * w; jraW += w; } else { narTotal += idx * w; narW += w; }
     });
     const weighted = totalW > 0 ? total / totalW : num(horse.avg5);
+    const jraWeighted = jraW > 0 ? jraTotal / jraW : null;
+    const narWeighted = narW > 0 ? narTotal / narW : null;
     const mean = scores.length ? scores.reduce((a,b)=>a+b,0)/scores.length : null;
     const sd = mean === null ? null : Math.sqrt(scores.reduce((a,b)=>a+(b-mean)**2,0)/scores.length);
     const stabilityAdj = sd === null ? 0 : clamp((8 - sd) * 0.10, -1.8, 0.8);
     const sameConditionAdj = sameCount >= 3 ? 1.4 : sameCount === 2 ? 0.9 : sameCount === 1 ? 0.4 : 0;
-    const isJraTransfer = jraCount >= 1 && narCount === 0;
-    return { runs, weighted, sd, stabilityAdj, sameCount, sameConditionAdj, isJraTransfer, jraCount, narCount, currentVenueRuns };
+    const isJraTransfer = transferStage >= 1 && transferStage <= 3;
+    return { runs, weighted, jraWeighted, narWeighted, sd, stabilityAdj, sameCount, sameConditionAdj, isJraTransfer, transferStage, jraCount, narCount, currentVenueRuns };
   };
 
   const computed = useMemo(() => {
@@ -2199,6 +2258,7 @@ export default function NARPredictionTool() {
     const raceAvg = {
       start: avgOf("_start"), oikake: avgOf("_oikake"), forecast: avgOf("_paceForecast"),
       recent: (()=>{ const v=parsed.map((h)=>h._recentMeta.weighted).filter((x)=>x!==null && Number.isFinite(x)); return v.length?v.reduce((a,b)=>a+b,0)/v.length:null; })(),
+      narRecent: (()=>{ const v=parsed.filter((h)=>!h._recentMeta.isJraTransfer).map((h)=>h._recentMeta.weighted).filter((x)=>x!==null && Number.isFinite(x)); return v.length?v.reduce((a,b)=>a+b,0)/v.length:null; })(),
       oddsLog: (()=>{ const v=parsed.filter((h)=>h._odds && h._odds>0).map((h)=>Math.log(h._odds)); return v.length?v.reduce((a,b)=>a+b,0)/v.length:null; })(),
     };
 
@@ -2222,12 +2282,24 @@ export default function NARPredictionTool() {
       let recentAdj = h._recentMeta.stabilityAdj + h._recentMeta.sameConditionAdj;
       if (h._r1 !== null && h._r3 !== null) recentAdj += clamp((h._r1 - h._r3) * 0.045, -1.5, 1.5);
 
-      // 中央転入初戦は地方実績ゼロを理由に大きく下げない。適応不確定分だけ軽く割引。
+      // 中央転入馬は専用処理。JRA所属というだけでは加点せず、ダート同距離の能力差と
+      // 保存162R以降の実績から学んだ「転入何戦目か」のズレを使う。4戦目以降は通常馬扱い。
       let transferAdj = 0;
+      let transferLearn = { adj:0, n:0, globalN:0 };
       if (h._recentMeta.isJraTransfer) {
-        transferAdj = -0.7;
-        if (recentIndex !== null && raceAvg.recent !== null && recentIndex >= raceAvg.recent + 8) transferAdj += 1.1;
-        if (recentIndex !== null && raceAvg.recent !== null && recentIndex >= raceAvg.recent + 15) transferAdj += 0.8;
+        const stage = h._recentMeta.transferStage;
+        transferLearn = centralTransferLearning.score(track, distance, stage);
+        const baseline = raceAvg.narRecent ?? raceAvg.recent;
+        const centralIndex = h._recentMeta.jraWeighted;
+        let abilityAdj = 0;
+        if (centralIndex !== null && baseline !== null) {
+          const gap = centralIndex - baseline;
+          // 明確な能力差だけを評価。小差は中央所属ボーナスにしない。
+          if (gap >= 6) abilityAdj = clamp((gap - 6) * 0.10, 0, 2.4);
+          else if (gap <= -6) abilityAdj = clamp((gap + 6) * 0.07, -1.5, 0);
+        }
+        const uncertainty = stage === 1 ? -0.35 : stage === 2 ? -0.10 : 0;
+        transferAdj = clamp(abilityAdj + transferLearn.adj + uncertainty, -3.2, 3.8);
       }
 
       // 展開はタイム指数より弱く。ダート短距離のスタート/追走だけ少し強める。
@@ -2307,12 +2379,12 @@ export default function NARPredictionTool() {
 
       return {
         ...h, _distVal:distVal, _courseVal:courseVal, _base:base, _recentIndex:recentIndex, _recentMeta:h._recentMeta,
-        _recentAdj:recentAdj, _transferAdj:transferAdj, _paceAdj:paceAdj, _jockeyLearnAdj:jockeyAdj, _jockeySample:learnedJockey.n,
+        _recentAdj:recentAdj, _transferAdj:transferAdj, _transferLearn:transferLearn, _paceAdj:paceAdj, _jockeyLearnAdj:jockeyAdj, _jockeySample:learnedJockey.n,
         _styleCourseAdj:styleCourseAdj, _formAdj:formAdj, _reliabilityAdj:reliabilityAdj, _oddsBonus:oddsBonus,
         _trainingScore:training100, _commentScore:comment100, _commentAdj:commentAdj, _contextAdj:contextAdj, _finalScore:finalScore,
       };
     });
-  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned]);
+  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning]);
 
   const ranked = useMemo(() => {
     const withScore = computed.filter((h) => h._finalScore !== null);
@@ -3111,7 +3183,7 @@ export default function NARPredictionTool() {
                     </td>
                     <td className={cellBase}><select value={h.runningStyle || ""} onChange={(e)=>updateHorse(h.id,"runningStyle",e.target.value)} className="bg-transparent text-xs">{RUNNING_STYLES.map(x=><option key={x} value={x}>{x || "未"}</option>)}</select>{h.styleConfidence > 0 && <div className="text-[9px] text-gray-400">自動{h.styleConfidence}%</div>}</td>
                     <td className={cellBase}>{COMMENT_TRAINING_TRACKS.includes(track) ? <select value={h.training || "B"} onChange={(e)=>updateHorse(h.id,"training",e.target.value)} className="bg-transparent text-xs">{["S","A","B","C","D"].map(x=><option key={x}>{x}</option>)}</select> : <span className="text-gray-300">—</span>}</td>
-                    <td className={cellBase}><div className="font-bold">{h._recentIndex !== null && h._recentIndex !== undefined ? Number(h._recentIndex).toFixed(1) : "-"}</div><div className="text-[9px] text-gray-400">同場同距離 {h._recentMeta?.sameCount || 0}本{h._recentMeta?.isJraTransfer ? " / 中央転入" : ""}</div></td>
+                    <td className={cellBase}><div className="font-bold">{h._recentIndex !== null && h._recentIndex !== undefined ? Number(h._recentIndex).toFixed(1) : "-"}</div><div className="text-[9px] text-gray-400">同場同距離 {h._recentMeta?.sameCount || 0}本{h._recentMeta?.isJraTransfer ? ` / 中央転入${h._recentMeta.transferStage}戦目 補正${h._transferAdj>=0?"+":""}${Number(h._transferAdj||0).toFixed(1)}` : ""}</div></td>
                     <td className={cellBase}><div className="font-bold">{h._jockeyLearnAdj ? `${h._jockeyLearnAdj>0?"+":""}${h._jockeyLearnAdj.toFixed(1)}` : "0.0"}</div><div className="text-[9px] text-gray-400">{h._jockeySample || 0}件</div></td>
                     <td className={cellBase}><input value={h.bodyChange ?? ""} onChange={(e)=>updateHorse(h.id,"bodyChange",e.target.value)} className="w-10 text-center border-none bg-transparent" /></td>
                     <td className={cellBase}><input value={h.condition ?? ""} onChange={(e)=>updateHorse(h.id,"condition",e.target.value)} className="w-10 text-center border-none bg-transparent" placeholder="未" /></td>

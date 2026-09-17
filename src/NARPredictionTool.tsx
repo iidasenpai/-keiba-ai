@@ -162,6 +162,20 @@ function cellClass(v) {
   return "bg-white text-blue-700";
 }
 
+// v6以前は「学習値が1項目も動かなかった結果済みレース」を learnedApplied=false のまま保存していた。
+// 実際には比較処理まで完了しているため、明示的に false かつ learningChanges={} のレースだけ安全に修復する。
+// undefined の古いレースは勝手に学習済み扱いにしない。
+const normalizeLearningAppliedFlag = (race:any) => {
+  const validTop3 = (race?.horses || []).filter((h:any) => {
+    const f = num(h.finish); return f !== null && f >= 1 && f <= 3;
+  }).length === 3;
+  const hasExplicitEmptyChanges = race?.learningChanges && typeof race.learningChanges === "object" && Object.keys(race.learningChanges).length === 0;
+  if (race?.status === "completed" && validTop3 && race?.learnedApplied === false && hasExplicitEmptyChanges) {
+    return { ...race, learnedApplied: true, learningNoChange: true };
+  }
+  return race;
+};
+
 export default function NARPredictionTool() {
   const [raceName, setRaceName] = useState("");
   const [raceNo, setRaceNo] = useState("1");
@@ -234,12 +248,17 @@ export default function NARPredictionTool() {
         if (saved && saved.value) {
           const items = JSON.parse(saved.value);
           if (Array.isArray(items) && items.length) {
-            const normalized = items.map((race) => ({
-              ...race,
-              horses: Array.isArray(race?.horses)
-                ? race.horses.map((h) => autoCompleteHorseFactors(h, race))
-                : [],
-            }));
+            const normalized = items.map((race) => {
+              const fixed = normalizeLearningAppliedFlag(race);
+              return {
+                ...fixed,
+                horses: Array.isArray(fixed?.horses)
+                  ? fixed.horses.map((h) => autoCompleteHorseFactors(h, fixed))
+                  : [],
+              };
+            });
+            const processedCount = normalized.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
+            setHistoryCount((prev) => Math.max(prev, processedCount));
             setSavedRaces(normalized);
           }
         } else {
@@ -251,12 +270,17 @@ export default function NARPredictionTool() {
             if (res.ok) {
               const backup = await res.json();
               if (backup?.type === "nar-ai-full-backup" && Array.isArray(backup.savedRaces) && backup.savedRaces.length) {
-                const normalized = backup.savedRaces.map((race) => ({
-                  ...race,
-                  horses: Array.isArray(race?.horses)
-                    ? race.horses.map((h) => autoCompleteHorseFactors(h, race))
-                    : [],
-                }));
+                const normalized = backup.savedRaces.map((race) => {
+                  const fixed = normalizeLearningAppliedFlag(race);
+                  return {
+                    ...fixed,
+                    horses: Array.isArray(fixed?.horses)
+                      ? fixed.horses.map((h) => autoCompleteHorseFactors(h, fixed))
+                      : [],
+                  };
+                });
+                const processedCount = normalized.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
+                setHistoryCount((prev) => Math.max(prev, processedCount));
                 setSavedRaces(normalized);
                 await window.storage.set("nar-saved-races", JSON.stringify(normalized));
               }
@@ -359,11 +383,17 @@ export default function NARPredictionTool() {
           if (st.oddsOn !== undefined) setOddsOn(st.oddsOn);
           if (st.decayScale !== undefined) setDecayScale(st.decayScale);
           if (st.oddsStrength !== undefined) setOddsStrength(st.oddsStrength);
-          setSavedRaces(data.savedRaces);
-          await window.storage.set("nar-tool-state", JSON.stringify(st));
-          await window.storage.set("nar-saved-races", JSON.stringify(data.savedRaces));
+          const normalizedImported = data.savedRaces.map((race:any) => {
+            const fixed = normalizeLearningAppliedFlag(race);
+            return { ...fixed, horses: Array.isArray(fixed?.horses) ? fixed.horses.map((h:any) => autoCompleteHorseFactors(h, fixed)) : [] };
+          });
+          const processedCount = normalizedImported.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
+          setHistoryCount((prev) => Math.max(prev, processedCount));
+          setSavedRaces(normalizedImported);
+          await window.storage.set("nar-tool-state", JSON.stringify({ ...st, historyCount: Math.max(Number(st.historyCount || 0), processedCount) }));
+          await window.storage.set("nar-saved-races", JSON.stringify(normalizedImported));
           setSavedRacesOpen(true);
-          flash(`全データを復元しました（${data.savedRaces.length}レース）`);
+          flash(`全データを復元しました（${normalizedImported.length}レース）`);
         } catch (e) {
           alert(`復元できませんでした: ${e instanceof Error ? e.message : "ファイル形式エラー"}`);
         }
@@ -2297,6 +2327,99 @@ export default function NARPredictionTool() {
     };
   }, [savedRaces, track, distance]);
 
+  // ---- ▲△☆のヒモ候補補正 ----
+  // ◎○は一切動かさず、3番手以下だけを過去結果から再順位付けする。
+  // 人気は能力評価へ直結させず「AI順位より市場支持が明確に強い馬をヒモで拾う」ための弱い補助信号としてだけ使う。
+  // 中央転入もここでは頭へ上げず、1〜3戦目の3着内実績を△☆候補にだけ反映する。
+  const himoLearning = useMemo(() => {
+    const global = new Map<string,{n:number,sum:number}>();
+    const exact = new Map<string,{n:number,sum:number}>();
+    const rankStats = new Map<number,{n:number,top3:number}>();
+    const observations:any[] = [];
+
+    const transferStageOf = (h:any) => {
+      const stored = Number(h?._recentMeta?.transferStage || 0);
+      if (stored >= 1 && stored <= 3) return stored;
+      const runs = Array.isArray(h?.recentRuns) ? h.recentRuns.slice(0,5) : [];
+      const jra = runs.filter((x:any)=>x?.source === "JRA" || JRA_TRACKS.includes(x?.track)).length;
+      const nar = runs.filter((x:any)=>!(x?.source === "JRA" || JRA_TRACKS.includes(x?.track))).length;
+      return jra >= 1 && nar <= 2 ? nar + 1 : 0;
+    };
+    const signBucket = (v:any) => {
+      const x = Number(v || 0);
+      return x < -0.25 ? "neg" : x > 0.25 ? "pos" : "mid";
+    };
+    const featureBuckets = (h:any, rawRank:number) => {
+      const same = Number(h?._recentMeta?.sameCount || 0);
+      const sameBucket = same <= 0 ? "0" : same === 1 ? "1" : same === 2 ? "2" : "3+";
+      const pop = num(h?.ninki);
+      let popBucket = "unknown";
+      if (pop !== null) {
+        const gap = pop - rawRank;
+        popBucket = gap <= -4 ? "much_more" : gap <= -2 ? "more" : gap <= 1 ? "same" : gap <= 3 ? "less" : "much_less";
+      }
+      return [
+        ["pop", popBucket],
+        ["transfer", String(transferStageOf(h))],
+        ["style", signBucket(h?._styleCourseAdj)],
+        ["recent", signBucket(h?._recentAdj)],
+        ["jockey", signBucket(h?._jockeyLearnAdj)],
+        ["form", signBucket(h?._formAdj)],
+        ["same", sameBucket],
+      ];
+    };
+    const add = (map:Map<string,{n:number,sum:number}>, key:string, residual:number) => {
+      const st = map.get(key) || { n:0, sum:0 };
+      st.n += 1; st.sum += residual; map.set(key, st);
+    };
+
+    const completed = savedRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3);
+    completed.forEach((r:any) => {
+      const ordered = [...(r.horses || [])]
+        .filter((h:any)=>num(h.predictedScore)!==null)
+        .sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const fallbackRank = new Map(ordered.map((h:any,i:number)=>[String(h.id || h.umaban), i+1]));
+      (r.horses || []).forEach((h:any) => {
+        let rr = num(h._rank);
+        if (rr === null || rr < 1) rr = fallbackRank.get(String(h.id || h.umaban)) || null;
+        if (rr === null || rr < 3 || rr > 10) return;
+        const f = num(h.finish);
+        const top3 = f !== null && f >= 1 && f <= 3 ? 1 : 0;
+        const st = rankStats.get(rr) || { n:0, top3:0 };
+        st.n += 1; st.top3 += top3; rankStats.set(rr, st);
+        observations.push({ r, h, rr, top3 });
+      });
+    });
+
+    observations.forEach(({r,h,rr,top3}:any) => {
+      const base = rankStats.get(rr);
+      const expected = base?.n ? base.top3 / base.n : 0.18;
+      const residual = top3 - expected;
+      featureBuckets(h, rr).forEach(([name,bucket]) => {
+        add(global, `${name}|${bucket}`, residual);
+        add(exact, `${r.track}|${r.distance}|${name}|${bucket}`, residual);
+      });
+    });
+
+    const factorWeight:any = { pop:5.0, transfer:2.0, style:1.2, recent:0.8, jockey:0.8, form:0.5, same:0.5 };
+    const bucketValue = (name:string, bucket:string) => {
+      const g = global.get(`${name}|${bucket}`);
+      const gValue = g?.n ? (g.sum / g.n) * sampleStrength(g.n) : 0;
+      const e = exact.get(`${track}|${distance}|${name}|${bucket}`);
+      const eStrength = sampleStrength(e?.n || 0);
+      const eValue = e?.n ? e.sum / e.n : 0;
+      return gValue * (1 - eStrength) + eValue * eStrength;
+    };
+    const adjust = (h:any, rawRank:number) => {
+      if (rawRank < 3 || rawRank > 10) return 0;
+      let raw = 0;
+      featureBuckets(h, rawRank).forEach(([name,bucket]) => { raw += bucketValue(name, bucket) * Number(factorWeight[name] || 0); });
+      // 直近データで時系列バックテストし、過剰入替を避けるため半分だけ反映。最大±0.95点。
+      return clamp(raw * 0.50, -0.95, 0.95);
+    };
+    return { adjust, samples: observations.length };
+  }, [savedRaces, track, distance]);
+
   const computed = useMemo(() => {
     const parsed = horses.map((h) => {
       const recentMeta = recentConditionMeta(h);
@@ -2452,15 +2575,28 @@ export default function NARPredictionTool() {
       const headAdj = h._finalScore === null ? 0 : headRankCalibration.adjust(rr);
       return { ...h, _rawScore:h._finalScore, _headAdj:headAdj, _selectionScore:h._finalScore===null?null:h._finalScore+headAdj };
     });
-    const sorted = calibrated.filter((h:any)=>h._selectionScore!==null).slice().sort((a:any,b:any)=>b._selectionScore-a._selectionScore);
+
+    // ◎○を確定したあと、3番手以下だけヒモ学習で並べ替える。頭候補は絶対にこの処理で変えない。
+    const headSorted = calibrated.filter((h:any)=>h._selectionScore!==null).slice().sort((a:any,b:any)=>b._selectionScore-a._selectionScore);
+    const headRank = new Map<string, number>(headSorted.map((h:any,i:number)=>[String(h.id), i+1]));
+    const withHimo = calibrated.map((h:any) => {
+      const rr = headRank.get(String(h.id)) || 99;
+      const himoAdj = h._selectionScore === null || rr < 3 ? 0 : himoLearning.adjust(h, rr);
+      return { ...h, _preHimoRank: rr < 99 ? rr : null, _himoAdj:himoAdj, _himoScore:h._selectionScore===null?null:h._selectionScore+himoAdj };
+    });
+    const byId = new Map(withHimo.map((h:any)=>[String(h.id), h]));
+    const fixedTop2 = headSorted.slice(0,2).map((h:any)=>byId.get(String(h.id))).filter(Boolean);
+    const fixedIds = new Set(fixedTop2.map((h:any)=>String(h.id)));
+    const tail = withHimo.filter((h:any)=>h._himoScore!==null && !fixedIds.has(String(h.id))).sort((a:any,b:any)=>b._himoScore-a._himoScore);
+    const sorted = [...fixedTop2, ...tail];
     const rankMap = new Map<string, number>(sorted.map((h:any,i:number)=>[String(h.id),i]));
     const marks = ["◎", "○", "▲", "△", "△", "☆"];
-    return calibrated.map((h:any) => {
+    return withHimo.map((h:any) => {
       const idx = rankMap.get(String(h.id));
       const autoMark = idx !== undefined && idx < marks.length ? marks[idx] : "";
-      return { ...h, _finalScore:h._selectionScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
+      return { ...h, _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
-  }, [computed, headRankCalibration]);
+  }, [computed, headRankCalibration, himoLearning]);
 
   const raceAnalytics = useMemo(() => {
     const scored = ranked.filter((h) => h._finalScore !== null).sort((a,b)=>b._finalScore-a._finalScore);
@@ -2785,27 +2921,30 @@ export default function NARPredictionTool() {
     const raceHorses=ranked.map((h:any)=>({ ...h, finish: finishByUmaban.get(String(h.umaban)) || "" }));
     const activeRecord = savedRaces.find((r) => r.id === raceId);
     const shouldLearn = !activeRecord?.learnedApplied;
+    const validResultForLearning = resultTop3Of({ horses: raceHorses }).length === 3;
+    const learningProcessed = !!(shouldLearn && learningOn && validResultForLearning);
     let canLearn=false;
     let changes:Record<string,number>={};
-    if(shouldLearn && learningOn){
+    if(learningProcessed){
       const learnedResult=learnFromRace(raceHorses, paceType, learned);
       changes=learnedResult.changes;
       canLearn=Object.keys(changes).length>0;
-      if(canLearn){
-        setLearned(learnedResult.next);
-        setHistoryCount((n)=>n+1);
-        setLearningHistory((prev)=>[{
-          raceId,
-          title: `${track}${raceNo}R ${distance}m`,
-          at:new Date().toISOString(),
-          changes,
-        },...prev].slice(0,100));
-      }
+      if(canLearn) setLearned(learnedResult.next);
+      // 学習値が動かなかったレースも「比較処理済み」として1Rに数える。
+      setHistoryCount((n)=>n+1);
+      setLearningHistory((prev)=>[{
+        raceId,
+        title: `${track}${raceNo}R ${distance}m`,
+        at:new Date().toISOString(),
+        changes,
+        noChange: !canLearn,
+      },...prev].slice(0,100));
     }
     const updated = currentRaceSnapshot(raceId, activeRecord || {});
     updated.status = "completed";
     updated.completedAt = new Date().toISOString();
-    updated.learnedApplied = activeRecord?.learnedApplied || canLearn;
+    updated.learnedApplied = activeRecord?.learnedApplied || learningProcessed;
+    updated.learningNoChange = learningProcessed && !canLearn;
     updated.resultOrder = order.join("-");
     updated.learningChanges = changes;
     updated.horses = raceHorses.map((h:any) => ({ ...sanitizeHorseRecord(h), mark: h.mark || h._autoMark || "", predictedScore: h._finalScore, finish: h.finish || "" }));
@@ -2818,7 +2957,7 @@ export default function NARPredictionTool() {
       setSavedRaces(nextSavedRaces);
       setResultEntryMode(false);
       setSavedRacesOpen(true);
-      flash(canLearn ? `結果${order.join("-")}を保存し、${Object.keys(changes).length}項目を学習しました` : `結果${order.join("-")}を保存しました`);
+      flash(learningProcessed ? (canLearn ? `結果${order.join("-")}を保存し、${Object.keys(changes).length}項目を学習しました` : `結果${order.join("-")}を保存し、学習処理済み（重み変更なし）`) : `結果${order.join("-")}を保存しました`);
     } catch (e) {
       flash("結果の保存に失敗しました。全データ保存でバックアップしてください");
     }
@@ -2829,21 +2968,21 @@ export default function NARPredictionTool() {
     if(!races.length){ flash("再学習できる結果済みレースがありません"); return; }
     let next:any={...DEFAULT_LEARNED};
     const history:any[]=[];
-    let learnedRaces=0;
-    const updatedIds=new Set<string>();
+    let changedRaces=0;
+    const updatedIds=new Set<string>(races.map((r:any)=>String(r.id)));
+    const noChangeById=new Map<string,boolean>();
     races.forEach((r:any)=>{
       const res=learnFromRace(r.horses||[], r.paceType||"M", next);
-      if(Object.keys(res.changes).length){
-        next=res.next; learnedRaces++;
-        history.unshift({raceId:r.id,title:`${r.track || ""}${String(r.raceNo || r.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1"}R ${r.distance || ""}m`.trim(),at:new Date().toISOString(),changes:res.changes,relearned:true});
-        updatedIds.add(r.id);
-      }
+      const changed=Object.keys(res.changes).length>0;
+      noChangeById.set(String(r.id), !changed);
+      if(changed){ next=res.next; changedRaces++; }
+      history.unshift({raceId:r.id,title:`${r.track || ""}${String(r.raceNo || r.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1"}R ${r.distance || ""}m`.trim(),at:new Date().toISOString(),changes:res.changes,relearned:true,noChange:!changed});
     });
     setLearned(next);
-    setHistoryCount(learnedRaces);
+    setHistoryCount(races.length);
     setLearningHistory(history.slice(0,100));
-    setSavedRaces((prev)=>prev.map((r:any)=>updatedIds.has(r.id)?{...r,learnedApplied:true}:r));
-    flash(`${learnedRaces}レースを既存結果から再学習しました`);
+    setSavedRaces((prev)=>prev.map((r:any)=>updatedIds.has(String(r.id))?{...r,learnedApplied:true,learningNoChange:noChangeById.get(String(r.id))===true}:r));
+    flash(`${races.length}レースを再確認し、${changedRaces}レースで学習値を更新しました`);
   };
 
   const setW = (key, val) => setWeights((w) => ({ ...w, [key]: Number(val) }));
@@ -2984,15 +3123,15 @@ export default function NARPredictionTool() {
       {raceAnalytics.marked.length > 0 && (
         <div id="result-section" className="scroll-mt-28 mx-3 mt-3 grid gap-3 lg:grid-cols-3">
           <div className="rounded-xl border border-indigo-200 bg-white p-3 shadow-sm lg:col-span-2">
-            <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は過去結果の頭取り実績を会場×距離ごとに小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
+            <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は頭取り補正、▲△☆は過去の3着内実績でヒモ候補だけ小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
             <div className="space-y-2 sm:hidden">
               {raceAnalytics.marked.map((h)=><div key={`marked-card-${h.id}`} className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同条件 {h._recentMeta?.sameCount||0}本</span><span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}</div></div></div>
+                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同条件 {h._recentMeta?.sameCount||0}本</span><span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
               </div>)}
             </div>
             <div className="hidden overflow-x-auto sm:block">
-              <table className="w-full min-w-[680px] text-xs"><thead><tr className="bg-indigo-50 text-indigo-800"><th className="p-2">印</th><th>馬番</th><th className="text-left">馬名</th><th>総合</th><th>同条件近走</th><th>頭補正</th><th>騎手補正</th><th>人気</th><th>オッズ</th><th>期待値</th></tr></thead>
-              <tbody>{raceAnalytics.marked.map((h)=><tr key={`marked-${h.id}`} className="border-t border-gray-100"><td className="p-2 text-center text-lg font-black">{h._displayMark}</td><td className="text-center font-bold">{h.umaban}</td><td className="font-bold">{h.name}</td><td className="text-center font-black">{h._finalScore?.toFixed(1) ?? "-"}</td><td className="text-center">{h._recentIndex !== null && h._recentIndex !== undefined ? Number(h._recentIndex).toFixed(1) : "-"} <span className="text-[9px] text-gray-400">({h._recentMeta?.sameCount || 0}本)</span></td><td className="text-center">{h._headAdj ? `${h._headAdj>0?"+":""}${Number(h._headAdj).toFixed(1)}` : "0.0"}</td><td className="text-center">{h._jockeyLearnAdj ? `${h._jockeyLearnAdj>0?"+":""}${h._jockeyLearnAdj.toFixed(1)}` : "0.0"}</td><td className="text-center">{h.ninki || "-"}</td><td className="text-center">{h.odds || "-"}</td><td className="text-center font-bold">{h._valueScore}</td></tr>)}</tbody></table>
+              <table className="w-full min-w-[740px] text-xs"><thead><tr className="bg-indigo-50 text-indigo-800"><th className="p-2">印</th><th>馬番</th><th className="text-left">馬名</th><th>総合</th><th>同条件近走</th><th>頭補正</th><th>ヒモ補正</th><th>騎手補正</th><th>人気</th><th>オッズ</th><th>期待値</th></tr></thead>
+              <tbody>{raceAnalytics.marked.map((h)=><tr key={`marked-${h.id}`} className="border-t border-gray-100"><td className="p-2 text-center text-lg font-black">{h._displayMark}</td><td className="text-center font-bold">{h.umaban}</td><td className="font-bold">{h.name}</td><td className="text-center font-black">{h._finalScore?.toFixed(1) ?? "-"}</td><td className="text-center">{h._recentIndex !== null && h._recentIndex !== undefined ? Number(h._recentIndex).toFixed(1) : "-"} <span className="text-[9px] text-gray-400">({h._recentMeta?.sameCount || 0}本)</span></td><td className="text-center">{h._headAdj ? `${h._headAdj>0?"+":""}${Number(h._headAdj).toFixed(1)}` : "0.0"}</td><td className="text-center">{h._himoAdj ? `${h._himoAdj>0?"+":""}${Number(h._himoAdj).toFixed(1)}` : "0.0"}</td><td className="text-center">{h._jockeyLearnAdj ? `${h._jockeyLearnAdj>0?"+":""}${h._jockeyLearnAdj.toFixed(1)}` : "0.0"}</td><td className="text-center">{h.ninki || "-"}</td><td className="text-center">{h.odds || "-"}</td><td className="text-center font-bold">{h._valueScore}</td></tr>)}</tbody></table>
             </div>
           </div>
           <div className="rounded-xl border border-rose-200 bg-white p-3 shadow-sm">
@@ -3174,15 +3313,15 @@ export default function NARPredictionTool() {
       <div className="bg-white mx-3 mt-3 rounded-lg shadow-sm border border-gray-200 p-3">
         <label className="flex items-center gap-2 text-xs font-bold text-gray-600">
           <input type="checkbox" checked={learningOn} onChange={(e) => setLearningOn(e.target.checked)} />
-          結果学習を予想へ反映（学習済み {historyCount}レース）
+          結果学習を予想へ反映（処理済み {historyCount}レース）
         </label>
         <div className="text-[11px] text-gray-400 mt-1">解析後は「レースを保存」。レース終了後は「3-11-5」のように1〜3着の馬番だけ入力すると、自動回顧と学習を行います。</div>
       </div>
 
       <div className="mx-3 mt-3 rounded-xl border border-violet-200 bg-white p-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-black text-violet-900">🧠 自動学習</div><div className="text-[10px] text-gray-500">結果保存時に好走馬と凡走馬を比較して重みを自動調整</div></div><div className="text-sm font-black text-violet-700">{historyCount}レース学習</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-black text-violet-900">🧠 自動学習</div><div className="text-[10px] text-gray-500">結果保存時に好走馬と凡走馬を比較。差が小さく重みが動かないレースも処理済みとして記録</div></div><div className="text-sm font-black text-violet-700">{historyCount}レース処理済み</div></div>
         <div className="mt-2 grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">◎勝率</div><div className="font-black">{learningSummary.total ? Math.round(learningSummary.topWin/learningSummary.total*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.topWin}/{learningSummary.total})</span></div></div><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">◎複勝率</div><div className="font-black">{learningSummary.total ? Math.round(learningSummary.topPlace/learningSummary.total*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.topPlace}/{learningSummary.total})</span></div></div><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">印の3着内捕捉率</div><div className="font-black">{learningSummary.totalTop3 ? Math.round(learningSummary.markedTop3/learningSummary.totalTop3*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.markedTop3}/{learningSummary.totalTop3})</span></div></div></div>
-        <div className="mt-2 flex flex-wrap items-center gap-2"><button onClick={relearnAllCompleted} className="rounded bg-violet-700 px-3 py-1.5 text-[10px] font-black text-white">既存結果から全再学習</button><span className="text-[10px] text-gray-500">1〜3着だけで、上位3頭とその他を比較。差が小さい項目は動かしません。</span></div>
+        <div className="mt-2 flex flex-wrap items-center gap-2"><button onClick={relearnAllCompleted} className="rounded bg-violet-700 px-3 py-1.5 text-[10px] font-black text-white">既存結果から全再学習</button><span className="text-[10px] text-gray-500">1〜3着で再計算し、旧版の未学習フラグもまとめて修復します。</span></div>
         {learningHistory.length>0 && <div className="mt-2 rounded bg-violet-50 p-2 text-[10px] text-violet-900"><div className="font-black">直近の学習変更</div><div className="mt-1">{Object.entries(learningHistory[0].changes||{}).map(([k,v]:any)=>`${k} ${v>0?"+":""}${Number(v).toFixed(3)}`).join(" / ") || "変更なし"}</div></div>}
         <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-gray-600">{Object.entries(learned).map(([k,v])=><span key={k} className="rounded bg-gray-100 px-2 py-1">{k}: {Number(v).toFixed(2)}</span>)}</div>
         <div className="mt-2 rounded border border-indigo-200 bg-indigo-50 p-2 text-[10px] text-indigo-950">

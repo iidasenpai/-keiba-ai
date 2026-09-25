@@ -217,6 +217,7 @@ export default function NARPredictionTool() {
   const [analysisTab, setAnalysisTab] = useState<"review"|"conditions"|"backtest">("review");
   const [resultOrderInput, setResultOrderInput] = useState("");
   const [learningHistory, setLearningHistory] = useState<any[]>([]);
+  const [flowFocusId, setFlowFocusId] = useState<string>("");
 
   // ---- 永続化 ----
   useEffect(() => {
@@ -2598,6 +2599,174 @@ export default function NARPredictionTool() {
     });
   }, [computed, headRankCalibration, himoLearning]);
 
+  // ---- AI展開予想図 β ----
+  // 最終印を図に並べるのではなく、脚質・近走通過順・枠・AI展開予測・同場同距離・騎手学習・
+  // タイム指数・中央転入・調教/コメントを段階別に統合し、「最も起こりやすい隊列」を推定する。
+  const flowPrediction = useMemo(() => {
+    const runners:any[] = ranked.filter((h:any) => h.umaban && h.name);
+    const n = runners.length;
+    if (n < 2) return { stages:[], paceLabel:paceType || "M", paceScore:50, summary:"", beneficiaries:[], risks:[], focus:null, evidence:0 };
+
+    const stylePos:any = { "逃":0.08, "先":0.25, "自在":0.40, "差":0.54, "追":0.76 };
+    const styleLane:any = { "逃":0.20, "先":0.34, "自在":0.50, "差":0.62, "追":0.74 };
+    const sortedByScore = runners.filter((h:any)=>h._finalScore!==null).slice().sort((a:any,b:any)=>b._finalScore-a._finalScore);
+    const scoreRank = new Map<string,number>(sortedByScore.map((h:any,i:number)=>[String(h.id), i]));
+    const maxU = Math.max(...runners.map((h:any)=>Number(h.umaban)||1), n);
+
+    const observed = (h:any, phase:"start"|"mid"|"turn") => {
+      const runs = Array.isArray(h.recentPositions) ? h.recentPositions : [];
+      let sw=0, sv=0, used=0;
+      runs.slice(0,5).forEach((r:any, i:number) => {
+        const ps = Array.isArray(r.positions) ? r.positions : [];
+        const nums = ps.map((x:any)=>Number(x)).filter((x:number)=>Number.isFinite(x) && x>0);
+        if (!nums.length) return;
+        let pos:number|null = null;
+        if (phase === "start") {
+          const early = ps.slice(0, Math.min(2, ps.length)).map((x:any)=>Number(x)).filter((x:number)=>Number.isFinite(x)&&x>0);
+          pos = early.length ? early[0] : nums[0];
+        } else if (phase === "mid") {
+          const midIdx = Math.max(0, Math.min(ps.length-1, Math.floor((ps.length-1)*0.55)));
+          const cand = Number(ps[midIdx]);
+          pos = Number.isFinite(cand) && cand>0 ? cand : nums[Math.min(nums.length-1, Math.floor(nums.length/2))];
+        } else {
+          const rev = [...ps].reverse().map((x:any)=>Number(x)).filter((x:number)=>Number.isFinite(x)&&x>0);
+          pos = rev.length ? rev[0] : nums[nums.length-1];
+        }
+        const fs = Number(r.fieldSize) || Math.max(pos || 1, n);
+        const pct = fs>1 && pos ? clamp((pos-1)/(fs-1),0,1) : 0.5;
+        const sameTrack = String(r.track||"") === String(track||"");
+        const sameDist = Number(r.distance) === Number(distance);
+        const conditionW = sameTrack && sameDist ? 1.65 : sameTrack ? 1.30 : sameDist ? 1.12 : 0.92;
+        const recencyW = 1 / (1 + i*0.22);
+        const w = conditionW * recencyW;
+        sv += pct*w; sw += w; used += 1;
+      });
+      return { pct: sw ? sv/sw : null, used };
+    };
+
+    const zFrom = (h:any, key:string) => {
+      const vals = runners.map((x:any)=>Number(x[key])).filter((x:number)=>Number.isFinite(x));
+      const v = Number(h[key]);
+      if (!Number.isFinite(v) || vals.length<3) return 0;
+      const mean = vals.reduce((a:number,b:number)=>a+b,0)/vals.length;
+      const sd = Math.sqrt(vals.reduce((a:number,b:number)=>a+(b-mean)*(b-mean),0)/vals.length) || 1;
+      return clamp((v-mean)/sd,-2,2);
+    };
+
+    const raw = runners.map((h:any) => {
+      const st = observed(h,"start"), md = observed(h,"mid"), tn = observed(h,"turn");
+      const style = stylePos[h.runningStyle] ?? 0.46;
+      const horseNo = Number(h.umaban)||Math.ceil(n/2);
+      const gate = clamp((horseNo-1)/Math.max(1,maxU-1),0,1);
+      // 枠番の入力が無い現行データでは、8枠制の一般的な割当（外枠側から2頭枠）を馬番と頭数から復元。
+      const singles = n <= 8 ? n : Math.max(0,16-n);
+      const flowWaku = n <= 8 ? clamp(horseNo,1,8) : (horseNo <= singles ? horseNo : singles + Math.ceil((horseNo-singles)/2));
+      // スタート系指数は高いほど前へ行けるものとして、集団内z-scoreを位置に変換。
+      const startAbility = clamp(0.5 - zFrom(h,"_start")*0.10 - zFrom(h,"_oikake")*0.07,0.05,0.95);
+      const styleConfidence = clamp(Number(h.styleConfidence||0)/100,0,1);
+      const obsW = st.pct===null ? 0 : clamp(0.28 + st.used*0.055,0.28,0.55);
+      let startPct = style*(0.42-obsW*0.18) + (st.pct ?? style)*obsW + gate*0.08 + startAbility*0.10;
+      // 内枠の逃先は前へ、外枠の追込は無理に前へ置かない。
+      if (["逃","先"].includes(h.runningStyle||"") && gate<0.35) startPct -= 0.035;
+      startPct = clamp(startPct,0.02,0.94);
+
+      // 向正面：近走実績を主、スタート隊列・会場×距離脚質傾向・騎手を加味。
+      const styleLearn = clamp(Number(h._styleCourseAdj||0)/1.6,-1,1);
+      const jockey = clamp(Number(h._jockeyLearnAdj||0)/3.8,-1,1);
+      let midPct = (md.pct ?? startPct)*0.48 + startPct*0.30 + style*0.14 + (0.5-styleLearn*0.12-jockey*0.05)*0.08;
+      if (paceType === "H") {
+        if (h.runningStyle === "逃") midPct += 0.035;
+        if (["差","追"].includes(h.runningStyle||"")) midPct -= 0.025;
+      } else if (paceType === "S") {
+        if (["逃","先"].includes(h.runningStyle||"")) midPct -= 0.025;
+        if (h.runningStyle === "追") midPct += 0.025;
+      }
+      midPct = clamp(midPct,0.02,0.96);
+
+      // 4角：近走4角位置を主に、現在の総合力（全要素反映済み）と展開適性で進出/後退を推定。
+      const rank = scoreRank.get(String(h.id));
+      const abilityPct = rank===undefined ? 0.60 : clamp(rank/Math.max(1,n-1),0,1);
+      const paceFit = clamp(Number(h._paceAdj||0)/2.5,-1,1);
+      const context = clamp(Number(h._contextAdj||0)/10,-1,1);
+      const form = clamp((Number(h._formAdj||0)+Number(h._recentAdj||0))/3,-1,1);
+      let turnPct = (tn.pct ?? midPct)*0.43 + midPct*0.20 + abilityPct*0.22 + (0.5-paceFit*0.16-context*0.08-form*0.08)*0.15;
+      turnPct = clamp(turnPct,0.02,0.97);
+
+      // 縦軸は内外。実際の進路は不確定なので、枠を土台に脚質と4角の差し進出を小幅に反映。
+      const baseLane = clamp(0.14 + gate*0.72,0.12,0.88);
+      const startLane = baseLane;
+      const midLane = clamp(baseLane*0.62 + (styleLane[h.runningStyle]??0.50)*0.38,0.10,0.90);
+      let turnLane = midLane;
+      if (["差","追"].includes(h.runningStyle||"")) turnLane += 0.08;
+      if (h.runningStyle === "逃") turnLane -= 0.05;
+      turnLane = clamp(turnLane,0.10,0.92);
+
+      const evidence = st.used + md.used + tn.used + Number(h._recentMeta?.sameCount||0);
+      const baseConf = 46 + Math.min(24,evidence*3.2) + styleConfidence*18 + (h._finalScore!==null?7:0) - (h._recentMeta?.isJraTransfer?8:0);
+      const conf = Math.round(clamp(baseConf,35,95));
+      const reasons:string[] = [];
+      if (st.used || md.used || tn.used) reasons.push(`近走通過順${Math.max(st.used,md.used,tn.used)}走`);
+      if (h.runningStyle) reasons.push(`脚質:${h.runningStyle}`);
+      if (Number(h._recentMeta?.sameCount||0)>0) reasons.push(`同場同距離${h._recentMeta.sameCount}本`);
+      if (Math.abs(Number(h._jockeyLearnAdj||0))>=0.35) reasons.push(`騎手傾向${h._jockeyLearnAdj>0?"＋":"−"}`);
+      if (Math.abs(Number(h._styleCourseAdj||0))>=0.25) reasons.push(`場×距離脚質${h._styleCourseAdj>0?"＋":"−"}`);
+      if (h._recentMeta?.isJraTransfer) reasons.push(`中央転入${h._recentMeta.transferStage||""}戦目`);
+      if (h._trainingScore!==null || h._commentScore!==null) reasons.push("調教/コメント反映");
+      return { ...h, flowWaku:clamp(Math.round(flowWaku),1,8), startPct, midPct, turnPct, startLane, midLane, turnLane, flowConfidence:conf, flowReasons:reasons };
+    });
+
+    const toStage = (keyPct:string,keyLane:string,label:string,direction:"left"|"right") => {
+      const placed = raw.map((h:any) => {
+        const pct = Number(h[keyPct]);
+        const lane = Number(h[keyLane]);
+        const x = direction === "left" ? 10 + pct*80 : 90 - pct*80;
+        let y = 18 + lane*68;
+        return { ...h, flowX:x, flowY:y };
+      }).sort((a:any,b:any)=>a.flowX-b.flowX);
+      // 近すぎる馬番チップだけ縦方向にずらし、視認性を確保する。
+      const settled:any[] = [];
+      placed.forEach((h:any)=>{
+        let y = h.flowY;
+        for (let tries=0; tries<5; tries++) {
+          const collision = settled.some((p:any)=>Math.abs(p.flowX-h.flowX)<6.5 && Math.abs(p.flowY-y)<12);
+          if (!collision) break;
+          y = clamp(y + (tries%2===0 ? 11 : -17),12,90);
+        }
+        settled.push({...h,flowY:y});
+      });
+      const avgConf = Math.round(settled.reduce((a:number,h:any)=>a+h.flowConfidence,0)/Math.max(1,settled.length));
+      return { key:keyPct, label, direction, horses:settled, confidence:avgConf };
+    };
+
+    const stages = [
+      toStage("startPct","startLane","スタート後","left"),
+      toStage("midPct","midLane","向正面","right"),
+      toStage("turnPct","turnLane","最終コーナー","left"),
+    ];
+
+    const escapeCount = raw.filter((h:any)=>h.runningStyle==="逃" || h.startPct<0.18).length;
+    const forwardCount = raw.filter((h:any)=>h.startPct<0.34).length;
+    const paceScore = Math.round(clamp((paceType==="H"?72:paceType==="S"?28:50) + (escapeCount-1)*8 + Math.max(0,forwardCount-3)*3,12,90));
+    const inferredPace = paceScore>=64?"H":paceScore<=38?"S":"M";
+    const turnSorted = raw.slice().sort((a:any,b:any)=>a.turnPct-b.turnPct);
+    const leaders = turnSorted.slice(0,Math.min(3,turnSorted.length));
+    const beneficiaries = raw.slice().sort((a:any,b:any)=>{
+      const gainA=(a.midPct-a.turnPct)+(Number(a._paceAdj||0)/10)+(Number(a._styleCourseAdj||0)/12);
+      const gainB=(b.midPct-b.turnPct)+(Number(b._paceAdj||0)/10)+(Number(b._styleCourseAdj||0)/12);
+      return gainB-gainA;
+    }).slice(0,3);
+    const risks = raw.slice().sort((a:any,b:any)=>{
+      const stressA=(a.turnPct-a.startPct) + (a.runningStyle==="逃"&&inferredPace==="H"?0.25:0) - Number(a._paceAdj||0)/12;
+      const stressB=(b.turnPct-b.startPct) + (b.runningStyle==="逃"&&inferredPace==="H"?0.25:0) - Number(b._paceAdj||0)/12;
+      return stressB-stressA;
+    }).slice(0,2);
+    const leadText = leaders.length ? leaders.map((h:any)=>`${h.umaban}${h.name}`).join("・") : "未判定";
+    const summary = `${inferredPace}寄り。4角先頭圏は ${leadText} を中心に予測。`;
+    const focus = flowFocusId ? raw.find((h:any)=>String(h.id)===String(flowFocusId)) || null : null;
+    const evidence = raw.reduce((a:number,h:any)=>a+(h.flowReasons?.length||0),0);
+    return { stages, paceLabel:inferredPace, paceScore, summary, beneficiaries, risks, focus, evidence };
+  }, [ranked, track, distance, paceType, flowFocusId]);
+
   const raceAnalytics = useMemo(() => {
     const scored = ranked.filter((h) => h._finalScore !== null).sort((a,b)=>b._finalScore-a._finalScore);
     if (!scored.length) return { chaos: 0, label: "未判定", reasons: [], marked: [], bets: [] };
@@ -3118,6 +3287,43 @@ export default function NARPredictionTool() {
           </div>
         </details>
       </div>
+
+      {/* AI展開予想図 β */}
+      {flowPrediction.stages.length > 0 && (
+        <div className="mx-3 mt-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="font-black text-white">🏇 AI展開予想図 <span className="rounded bg-violet-600 px-1.5 py-0.5 text-[9px] align-middle">β</span></div>
+              <div className="mt-1 text-[10px] leading-relaxed text-slate-300">脚質・近走通過順・枠・AI展開・同場同距離・騎手・指数・中央転入・調教/コメントを統合した最頻シナリオ</div>
+            </div>
+            <div className="rounded-lg bg-slate-800 px-3 py-2 text-right"><div className="text-[9px] font-bold text-slate-400">ペース</div><div className={`text-xl font-black ${flowPrediction.paceLabel==="H"?"text-rose-400":flowPrediction.paceLabel==="S"?"text-sky-400":"text-amber-300"}`}>{flowPrediction.paceLabel}</div></div>
+          </div>
+
+          <div className="mt-3 space-y-3">
+            {flowPrediction.stages.map((stage:any)=><div key={stage.label} className="overflow-hidden rounded-xl border border-slate-700 bg-[#303030]">
+              <div className="flex items-center justify-between border-b border-slate-500 px-3 py-2">
+                <div className="text-sm font-black text-white">{stage.label}</div>
+                <div className="flex items-center gap-3"><span className="text-[10px] font-bold text-slate-300">信頼度 {stage.confidence}</span><span className="text-sm font-black text-white">進行方向 {stage.direction==="left"?"←":"→"}</span></div>
+              </div>
+              <div className="relative h-[230px] overflow-hidden bg-[#303030] sm:h-[250px]">
+                {[18,36,54,72,90].map((y)=><div key={`h-${y}`} className="absolute left-0 right-0 border-t border-slate-500/45" style={{top:`${y}%`}} />)}
+                {[10,20,30,40,50,60,70,80,90].map((x)=><div key={`v-${x}`} className="absolute bottom-0 top-0 border-l border-slate-500/25" style={{left:`${x}%`}} />)}
+                <div className="absolute left-2 top-2 rounded bg-black/35 px-1.5 py-0.5 text-[9px] font-bold text-slate-300">内</div>
+                <div className="absolute bottom-2 left-2 rounded bg-black/35 px-1.5 py-0.5 text-[9px] font-bold text-slate-300">外</div>
+                {stage.horses.map((h:any)=>{const wk=Number(h.flowWaku)||wakuOf(h.umaban); const wc=wk?WAKU_COLORS[wk]:{bg:"#fff",text:"#111",border:"#111"}; const active=String(flowFocusId)===String(h.id); return <button key={`${stage.label}-${h.id}`} onClick={()=>setFlowFocusId(active?"":String(h.id))} title={`${h.umaban} ${h.name}`} className={`absolute z-10 flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border-2 text-sm font-black shadow-lg transition-transform active:scale-110 ${active?"ring-2 ring-violet-300 ring-offset-2 ring-offset-slate-900":""}`} style={{left:`${h.flowX}%`,top:`${h.flowY}%`,backgroundColor:wc.bg,color:wc.text,borderColor:wc.border}}>{h.umaban}</button>})}
+              </div>
+            </div>)}
+          </div>
+
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <div className="rounded-xl bg-slate-900 p-3 sm:col-span-2"><div className="text-[10px] font-black text-violet-300">AIの読み</div><div className="mt-1 text-xs font-bold leading-relaxed text-white">{flowPrediction.summary}</div><div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-700"><div className="h-full rounded-full bg-violet-500" style={{width:`${flowPrediction.paceScore}%`}} /></div><div className="mt-1 flex justify-between text-[9px] font-bold text-slate-400"><span>S</span><span>M</span><span>H</span></div></div>
+            <div className="rounded-xl bg-slate-900 p-3"><div className="text-[10px] font-black text-emerald-300">展開利候補</div><div className="mt-1 flex flex-wrap gap-1">{flowPrediction.beneficiaries.map((h:any)=><span key={`ben-${h.id}`} className="rounded bg-emerald-950 px-2 py-1 text-[10px] font-bold text-emerald-200">{h.umaban} {h.name}</span>)}</div><div className="mt-2 text-[10px] font-black text-rose-300">展開不利懸念</div><div className="mt-1 flex flex-wrap gap-1">{flowPrediction.risks.map((h:any)=><span key={`risk-${h.id}`} className="rounded bg-rose-950 px-2 py-1 text-[10px] font-bold text-rose-200">{h.umaban} {h.name}</span>)}</div></div>
+          </div>
+
+          {flowPrediction.focus && <div className="mt-2 rounded-xl border border-violet-700/60 bg-violet-950/40 p-3"><div className="flex items-center justify-between gap-2"><div className="text-xs font-black text-white">{flowPrediction.focus.umaban} {flowPrediction.focus.name}</div><div className="text-[10px] font-bold text-violet-200">位置予測信頼度 {flowPrediction.focus.flowConfidence}</div></div><div className="mt-1 flex flex-wrap gap-1">{(flowPrediction.focus.flowReasons||[]).map((r:string)=><span key={r} className="rounded bg-violet-900/70 px-2 py-1 text-[9px] font-bold text-violet-100">{r}</span>)}</div><div className="mt-2 text-[9px] leading-relaxed text-slate-300">馬番をもう一度タップすると閉じます。隊列は「最も起こりやすい1シナリオ」で、出遅れ・騎手判断・接触など当日の偶発要因は含みません。</div></div>}
+          {!flowPrediction.focus && <div className="mt-2 text-center text-[9px] text-slate-400">馬番をタップすると、その位置予測に使った主な根拠を表示します。</div>}
+        </div>
+      )}
 
       {/* 注目馬・波乱度・学習状況 */}
       {raceAnalytics.marked.length > 0 && (

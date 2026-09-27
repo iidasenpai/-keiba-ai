@@ -986,9 +986,15 @@ export default function NARPredictionTool() {
       const n = Number(rawLines[i]); if (n < 1 || n > 18) continue;
       const expected = list.find((h) => String(h.umaban) === String(n));
       if (!expected?.name) continue;
-      const next = String(rawLines[i + 1] || "").replace(/[\s・･]/g, "");
+      // 詳細出馬表はサイト側の見出しや印が馬番と馬名の間に入ることがある。
+      // 直後1行固定ではなく、次の数行から既存馬名を探してブロック開始を確定する。
       const name = String(expected.name || "").replace(/[\s・･]/g, "");
-      if (next === name || next.includes(name) || name.includes(next)) starts.push({ i, n, h: expected });
+      let nameLineOffset = -1;
+      for (let k = 1; k <= 4 && i + k < rawLines.length; k += 1) {
+        const cand = String(rawLines[i + k] || "").replace(/[\s・･]/g, "");
+        if (cand === name || cand.includes(name) || name.includes(cand)) { nameLineOffset = k; break; }
+      }
+      if (nameLineOffset > 0) starts.push({ i, n, h: expected, nameLineOffset });
     }
 
     const classifyPositions = (positions, fieldSize = 14) => {
@@ -1003,7 +1009,7 @@ export default function NARPredictionTool() {
 
     starts.forEach((st, idx) => {
       const end = idx + 1 < starts.length ? starts[idx + 1].i : rawLines.length;
-      const block = rawLines.slice(st.i + 2, end);
+      const block = rawLines.slice(st.i + Number(st.nameLineOffset || 1) + 1, end);
       const h = st.h;
       const joined = block.join(" ");
 
@@ -1028,10 +1034,14 @@ export default function NARPredictionTool() {
         const dm = segJoin.match(/ダ(\d{3,4})/);
         const fs = segJoin.match(/(\d{1,2})頭/);
         let positions = [];
-        for (let j = 0; j < seg.length - 1; j += 1) {
-          if (/^-{2,}$/.test(seg[j])) {
-            const pm = seg[j + 1].match(/^((?:-|\d{1,2})(?:\s+(?:-|\d{1,2})){1,3})$/);
-            if (pm) positions = pm[1].split(/\s+/).map((v) => v === "-" ? NaN : Number(v));
+        // 通過順はサイトによって「--」の次行だったり、そのまま1行で並ぶ。
+        // 2〜4個の整数（または -）だけで構成される行を候補にし、最後に見つかったものを採用。
+        for (let j = 0; j < seg.length; j += 1) {
+          const pm = String(seg[j] || "").match(/^((?:-|\d{1,2})(?:\s+(?:-|\d{1,2})){1,3})$/);
+          if (pm) {
+            const vals = pm[1].split(/\s+/).map((v) => v === "-" ? NaN : Number(v));
+            const finite = vals.filter((v) => Number.isFinite(v));
+            if (finite.length >= 2 && finite.every((v) => v >= 1 && v <= 18)) positions = vals;
           }
         }
         if (dm && positions.length) {
@@ -3504,6 +3514,7 @@ export default function NARPredictionTool() {
                   <span>頭補正 <b>{Number(h._headAdj||0)>=0?"+":""}{Number(h._headAdj||0).toFixed(1)}</b></span>
                   <span>ヒモ補正 <b>{Number(h._himoAdj||0)>=0?"+":""}{Number(h._himoAdj||0).toFixed(1)}</b></span>
                 </div>
+                <button type="button" onClick={()=>{ if(confirm(`${h.umaban}番 ${h.name || "この馬"} を出走馬から削除しますか？`)) removeHorse(h.id); }} className="mt-3 w-full rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-black text-red-600">出走取消・この馬を削除</button>
               </div>
             </details>;
           })}

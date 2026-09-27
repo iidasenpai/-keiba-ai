@@ -22,6 +22,26 @@ const GOINGS = ["良", "稍重", "重", "不良"];
 const RUNNING_STYLES = ["", "逃", "先", "差", "追", "自在"];
 const JRA_TRACKS = ["札幌","函館","福島","新潟","東京","中山","中京","京都","阪神","小倉"];
 const COMMENT_TRAINING_TRACKS = ["浦和","船橋","大井","川崎","門別"];
+
+// 会場・距離の表記揺れを吸収して、全機能で「同場同距離」を同じ基準で判定する。
+const normalizeDigits = (v:any) => String(v ?? "").replace(/[０-９]/g, (d)=>String(d.charCodeAt(0)-0xFEE0));
+const normalizeTrackName = (v:any) => {
+  let s = normalizeDigits(v).replace(/[\s　]/g, "").replace(/競馬場/g, "").replace(/競馬/g, "");
+  s = s.replace(/(?:ダート|ダ|芝).*$/g, "").replace(/\d.*$/g, "");
+  const all = [...NAR_TRACKS, ...JRA_TRACKS];
+  return all.find((t)=>s.includes(t)) || s;
+};
+const normalizeDistanceValue = (v:any) => {
+  const s = normalizeDigits(v).replace(/[,，\s　]/g, "");
+  const m = s.match(/(\d{3,4})/);
+  return m ? Number(m[1]) : 0;
+};
+const sameTrackName = (a:any,b:any) => !!normalizeTrackName(a) && normalizeTrackName(a) === normalizeTrackName(b);
+const sameDistanceValue = (a:any,b:any) => {
+  const x=normalizeDistanceValue(a), y=normalizeDistanceValue(b);
+  return x>0 && y>0 && x===y;
+};
+const sameTrackDistance = (ta:any,da:any,tb:any,db:any) => sameTrackName(ta,tb) && sameDistanceValue(da,db);
 const PACE_TYPES = ["S", "M", "H"];
 const TRAINING_SCORE = { S: 3.0, A: 2.0, B: 0.8, C: 0, D: -1.5 };
 const GRADE_TO_TRAINING_100 = { S: 92, A: 82, B: 70, C: 56, D: 40 };
@@ -785,9 +805,9 @@ export default function NARPredictionTool() {
       while ((m = runRe.exec(joined)) !== null) {
         const venue = m[1];
         runs.push({
-          track: venue,
+          track: normalizeTrackName(venue),
           surface: m[2] === "芝" ? "芝" : "ダート",
-          distance: Number(m[3]),
+          distance: normalizeDistanceValue(m[3]),
           pace: m[4],
           index: Number(m[5]),
           adjustment: Number(m[6]),
@@ -2200,7 +2220,7 @@ export default function NARPredictionTool() {
     };
 
     completed.forEach((r:any) => {
-      const key = `${r.track}|${r.distance}`;
+      const key = `${normalizeTrackName(r.track)}|${normalizeDistanceValue(r.distance)}`;
       const current = byCondition.get(key) || { n:0, learned:{...DEFAULT_LEARNED} };
       const horses = (r.horses || []).map((h:any) => ({...h}));
       const scored = horses.filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
@@ -2237,7 +2257,7 @@ export default function NARPredictionTool() {
   }, [savedRaces]);
 
   const currentCourseLearning = useMemo(() => {
-    const local = courseDistanceLearning.get(`${track}|${distance}`) || { n:0, learned:{...DEFAULT_LEARNED} };
+    const local = courseDistanceLearning.get(`${normalizeTrackName(track)}|${normalizeDistanceValue(distance)}`) || { n:0, learned:{...DEFAULT_LEARNED} };
     const strength = sampleStrength(local.n);
     const effective:any = {};
     Object.keys(DEFAULT_LEARNED).forEach((k) => {
@@ -2313,7 +2333,7 @@ export default function NARPredictionTool() {
 
   const recentConditionMeta = (horse) => {
     const runs = Array.isArray(horse.recentRuns) ? horse.recentRuns.slice(0,5) : [];
-    const targetDistance = Number(distance) || 0;
+    const targetDistance = normalizeDistanceValue(distance);
     const recency = [1.45, 1.22, 1.05, 0.88, 0.72];
     const jraCount = runs.filter((r) => r?.source === "JRA" || JRA_TRACKS.includes(r?.track)).length;
     const narCount = runs.filter((r) => !(r?.source === "JRA" || JRA_TRACKS.includes(r?.track))).length;
@@ -2325,8 +2345,8 @@ export default function NARPredictionTool() {
     runs.forEach((r, i) => {
       const idx = num(r.index);
       if (idx === null) return;
-      const rd = Number(r.distance) || 0;
-      const sameVenue = r.track === track;
+      const rd = normalizeDistanceValue(r.distance);
+      const sameVenue = sameTrackName(r.track, track);
       const sameDistance = targetDistance > 0 && rd === targetDistance;
       const nearDistance = targetDistance > 0 && Math.abs(rd - targetDistance) <= 200;
       const isJra = r.source === "JRA" || JRA_TRACKS.includes(r.track);
@@ -2708,8 +2728,8 @@ export default function NARPredictionTool() {
         }
         const fs = Number(r.fieldSize) || Math.max(pos || 1, n);
         const pct = fs>1 && pos ? clamp((pos-1)/(fs-1),0,1) : 0.5;
-        const sameTrack = String(r.track||"") === String(track||"");
-        const sameDist = Number(r.distance) === Number(distance);
+        const sameTrack = sameTrackName(r.track, track);
+        const sameDist = sameDistanceValue(r.distance, distance);
         const conditionW = sameTrack && sameDist ? 1.70 : sameTrack ? 1.32 : sameDist ? 1.14 : 0.90;
         const recencyW = 1 / (1 + i*0.22);
         const w = conditionW * recencyW;
@@ -2730,8 +2750,8 @@ export default function NARPredictionTool() {
         if (fs<=1) return;
         // +なら道中～4角で前進している
         const gain=(first-last)/(fs-1);
-        const sameTrack=String(r.track||"")===String(track||"");
-        const sameDist=Number(r.distance)===Number(distance);
+        const sameTrack=sameTrackName(r.track, track);
+        const sameDist=sameDistanceValue(r.distance, distance);
         const w=(sameTrack&&sameDist?1.65:sameTrack?1.28:sameDist?1.10:0.90)/(1+i*0.20);
         sum+=gain*w; sw+=w; used+=1;
       });
@@ -2745,8 +2765,8 @@ export default function NARPredictionTool() {
         const idx=Number(r.index);
         if (!Number.isFinite(idx)) return;
         const samePace=String(r.pace||"")===targetPace;
-        const sameTrack=String(r.track||"")===String(track||"");
-        const sameDist=Number(r.distance)===Number(distance);
+        const sameTrack=sameTrackName(r.track, track);
+        const sameDist=sameDistanceValue(r.distance, distance);
         const w=(samePace?1.55:0.72)*(sameTrack&&sameDist?1.45:sameTrack?1.20:sameDist?1.08:0.92)/(1+i*0.18);
         sv+=idx*w; sw+=w; used+=samePace?1:0;
       });
@@ -3496,7 +3516,7 @@ export default function NARPredictionTool() {
             <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は頭取り補正、▲△☆は過去の3着内実績でヒモ候補だけ小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
             <div className="space-y-2 sm:hidden">
               {raceAnalytics.marked.map((h)=><div key={`marked-card-${h.id}`} className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同条件 {h._recentMeta?.sameCount||0}本</span><span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
+                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span><span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
               </div>)}
             </div>
             <div className="hidden overflow-x-auto sm:block">

@@ -1003,22 +1003,27 @@ export default function NARPredictionTool() {
       .filter(Boolean);
     const list = baseList.map((h) => ({ ...h }));
 
+    // 現在の出走馬名を基準にブロックを切る。馬番の直後に馬名が来ないサイト表記でも拾う。
     const starts = [];
-    for (let i = 0; i < rawLines.length - 1; i += 1) {
-      if (!/^\d{1,2}$/.test(rawLines[i])) continue;
-      const n = Number(rawLines[i]); if (n < 1 || n > 18) continue;
-      const expected = list.find((h) => String(h.umaban) === String(n));
-      if (!expected?.name) continue;
-      // 詳細出馬表はサイト側の見出しや印が馬番と馬名の間に入ることがある。
-      // 直後1行固定ではなく、次の数行から既存馬名を探してブロック開始を確定する。
-      const name = String(expected.name || "").replace(/[\s・･]/g, "");
-      let nameLineOffset = -1;
-      for (let k = 1; k <= 4 && i + k < rawLines.length; k += 1) {
-        const cand = String(rawLines[i + k] || "").replace(/[\s・･]/g, "");
-        if (cand === name || cand.includes(name) || name.includes(cand)) { nameLineOffset = k; break; }
+    const usedHorse = new Set();
+    for (let i = 0; i < rawLines.length; i += 1) {
+      const cand = String(rawLines[i] || "").replace(/[\s・･]/g, "");
+      if (!cand) continue;
+      const expected = list.find((h)=>{
+        if (!h?.name || usedHorse.has(String(h.umaban))) return false;
+        const nm = String(h.name).replace(/[\s・･]/g, "");
+        return cand === nm || (nm.length >= 3 && cand.includes(nm));
+      });
+      if (!expected) continue;
+      // 馬名より前の近い位置に同じ馬番があればそこから、無ければ馬名行から開始。
+      let blockStart = i;
+      for (let j = i - 1; j >= Math.max(0, i - 8); j -= 1) {
+        if (String(rawLines[j]).trim() === String(expected.umaban)) { blockStart = j; break; }
       }
-      if (nameLineOffset > 0) starts.push({ i, n, h: expected, nameLineOffset });
+      starts.push({ i:blockStart, nameIndex:i, n:Number(expected.umaban), h:expected, nameLineOffset:i-blockStart });
+      usedHorse.add(String(expected.umaban));
     }
+    starts.sort((a,b)=>a.i-b.i);
 
     const classifyPositions = (positions, fieldSize = 14) => {
       const first = positions.find((x) => Number.isFinite(x) && x > 0);
@@ -1036,9 +1041,9 @@ export default function NARPredictionTool() {
       const h = st.h;
       const joined = block.join(" ");
 
-      const explicit = joined.match(/(?:^|\s)(逃|先|差|追)中(\d+)週/);
+      const explicit = joined.match(/(?:脚質\s*[:：]?\s*)?(逃|先|差|追|自在)\s*(?:中\s*)?(\d+)?\s*週?/) || joined.match(/(?:^|\s)(逃|先|差|追|自在)(?=\s|$)/);
       const explicitStyle = explicit?.[1] || "";
-      if (explicit?.[2]) h.layoffWeeks = Number(explicit[2]);
+      if (explicit?.[2] && Number.isFinite(Number(explicit[2]))) h.layoffWeeks = Number(explicit[2]);
 
       const body = joined.match(/(\d{3})kg\s*\(([+\-]?\d+)\)/);
       if (body) h.bodyChange = Number(body[2]) > 0 ? `+${Number(body[2])}` : String(Number(body[2]));
@@ -1046,7 +1051,7 @@ export default function NARPredictionTool() {
 
       const raceStarts = [];
       for (let bi = 0; bi < block.length; bi += 1) {
-        const dm = block[bi].match(/^\d{2}\/\d{2}\s+([一-龠ヶァ-ヴー]+)\s+\d{1,2}R$/);
+        const dm = block[bi].match(/^(?:\d{2,4}[\/.-])?\d{1,2}[\/.-]\d{1,2}\s+([一-龠々ヶァ-ヴー]+)\s*\d{1,2}R(?:\s|$)/);
         if (dm) raceStarts.push({ i: bi, track: dm[1] });
       }
       const runs = [];
@@ -1054,13 +1059,14 @@ export default function NARPredictionTool() {
         const rend = ri + 1 < raceStarts.length ? raceStarts[ri + 1].i : block.length;
         const seg = block.slice(rs.i, rend);
         const segJoin = seg.join(" ");
-        const dm = segJoin.match(/ダ(\d{3,4})/);
+        const dm = segJoin.match(/(?:ダート|ダ)\s*(\d{3,4})\s*m?/);
         const fs = segJoin.match(/(\d{1,2})頭/);
         let positions = [];
         // 通過順はサイトによって「--」の次行だったり、そのまま1行で並ぶ。
         // 2〜4個の整数（または -）だけで構成される行を候補にし、最後に見つかったものを採用。
         for (let j = 0; j < seg.length; j += 1) {
-          const pm = String(seg[j] || "").match(/^((?:-|\d{1,2})(?:\s+(?:-|\d{1,2})){1,3})$/);
+          const posLine = String(seg[j] || "").replace(/[→＞>・,，]/g, " ").replace(/[()（）]/g, " ").replace(/\s+/g, " ").trim();
+          const pm = posLine.match(/^((?:-|\d{1,2})(?:\s+(?:-|\d{1,2})){1,3})$/);
           if (pm) {
             const vals = pm[1].split(/\s+/).map((v) => v === "-" ? NaN : Number(v));
             const finite = vals.filter((v) => Number.isFinite(v));
@@ -1072,6 +1078,26 @@ export default function NARPredictionTool() {
           runs.push({ track: rs.track, distance: Number(dm[1]), positions, fieldSize, style: classifyPositions(positions, fieldSize) });
         }
       });
+      // 日付/競馬場見出しの表記が変わっていても、通過順位そのものが読めれば脚質判定は止めない。
+      if (!runs.length) {
+        const fallbackRuns = [];
+        for (let bi = 0; bi < block.length; bi += 1) {
+          const posLine = String(block[bi] || "").replace(/[→＞>・,，]/g, " ").replace(/[()（）]/g, " ").replace(/\s+/g, " ").trim();
+          const pm = posLine.match(/^((?:-|\d{1,2})(?:\s+(?:-|\d{1,2})){1,3})$/);
+          if (!pm) continue;
+          const vals = pm[1].split(/\s+/).map((v)=>v === "-" ? NaN : Number(v));
+          const finite = vals.filter((v)=>Number.isFinite(v));
+          if (finite.length < 2 || !finite.every((v)=>v>=1 && v<=18)) continue;
+          const around = block.slice(Math.max(0, bi-12), Math.min(block.length, bi+5)).join(" ");
+          const tr = NAR_TRACKS.find((t)=>around.includes(t)) || track;
+          const dmm = around.match(/(?:ダート|ダ)\s*(\d{3,4})\s*m?/);
+          const fsm = around.match(/(\d{1,2})頭/);
+          const fsn = fsm ? Number(fsm[1]) : 14;
+          fallbackRuns.push({ track:tr, distance:dmm?Number(dmm[1]):Number(distance), positions:vals, fieldSize:fsn, style:classifyPositions(vals,fsn) });
+          if (fallbackRuns.length >= 5) break;
+        }
+        runs.push(...fallbackRuns);
+      }
       h.recentPositions = runs;
 
       const votes = { "逃": 0, "先": 0, "差": 0, "追": 0 };

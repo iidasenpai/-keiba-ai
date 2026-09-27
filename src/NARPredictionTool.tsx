@@ -625,19 +625,25 @@ export default function NARPredictionTool() {
     for (let i = 0; i < lines.length; i += 1) {
       if (!isHorseNumber(lines[i])) continue;
       const umaban = lines[i];
-      const nameLine = lines[i + 1] || "";
-      if (!isHorseName(nameLine)) continue;
-
-      const name = nameLine;
-      const info = lines[i + 2] || "";
-      const oddsLine = lines[i + 3] || "";
-      const bodyLine = lines[i + 4] || "";
-      const changeLine = lines[i + 5] || "";
+      // 実データは「馬番 → -- / 取消 / 除外 → 馬名」の順になる。
+      // 馬番直後を馬名と決め打ちせず、次の6行から最初の有効な馬名を探す。
+      let nameIdx = -1;
+      for (let k = i + 1; k <= Math.min(i + 6, lines.length - 1); k += 1) {
+        if (isHorseName(lines[k]) && !/^(?:取消|除外)$/.test(lines[k])) { nameIdx = k; break; }
+      }
+      if (nameIdx < 0) continue;
+      const name = lines[nameIdx];
+      const statusText = lines.slice(i + 1, nameIdx + 1).join(" ");
+      const info = lines[nameIdx + 1] || "";
+      const oddsLine = lines[nameIdx + 2] || "";
+      const bodyLine = lines[nameIdx + 3] || "";
+      const changeLine = lines[nameIdx + 4] || "";
 
       let h = list.find((x) => String(x.umaban) === umaban) || findHorse(name, list);
       if (!h) { h = { ...emptyHorse(), umaban, name }; list.push(h); }
       h.umaban = umaban;
       h.name = name;
+      h.raceStatus = /取消/.test(statusText) ? "取消" : /除外/.test(statusText) ? "除外" : "";
 
       const sex = info.match(/(牡|牝|セ)\s*(\d{1,2})/);
       if (sex) h.sex = `${sex[1]}${sex[2]}`;
@@ -780,21 +786,26 @@ export default function NARPredictionTool() {
       if (/^(?:大井|船橋|川崎|浦和|門別|園田|姫路|高知|佐賀|名古屋|笠松|金沢|盛岡|水沢|帯広|東京|中山|京都|阪神|中京|新潟|福島|小倉|札幌|函館)(?:ダ|芝)/.test(name)) continue;
       headers.push({ i, umaban: m[1], name });
     }
-    // 馬番と馬名が別行の旧形式も拾う。
+    // 馬番と馬名が別行の形式を拾う。実データの「馬番 → -- → 馬名」に対応。
     for (let i = 0; i < lines.length - 1; i += 1) {
       if (!/^\d{1,2}$/.test(lines[i])) continue;
       const n = Number(lines[i]); if (n < 1 || n > 18) continue;
-      if (/^\d/.test(lines[i+1])) continue;
-      const sepName = lines[i+1].split(/\s+/)[0];
-      if (!isUsableHorseName(sepName)) continue;
-      if (!headers.some((x)=>x.i===i)) headers.push({ i, umaban: lines[i], name: sepName, separate: true });
+      let nameIdx = -1;
+      for (let k = i + 1; k <= Math.min(i + 5, lines.length - 1); k += 1) {
+        const cand = lines[k].split(/\s+/)[0];
+        if (/^(?:--|－|-|取消|除外)$/.test(cand)) continue;
+        if (isUsableHorseName(cand) && !/^\d/.test(cand)) { nameIdx = k; break; }
+      }
+      if (nameIdx < 0) continue;
+      const sepName = lines[nameIdx].split(/\s+/)[0];
+      if (!headers.some((x)=>x.i===i)) headers.push({ i, umaban: lines[i], name: sepName, separate: true, nameOffset: nameIdx-i });
     }
     headers.sort((a,b)=>a.i-b.i);
 
     for (let hi = 0; hi < headers.length; hi += 1) {
       const head = headers[hi];
       const end = hi + 1 < headers.length ? headers[hi+1].i : lines.length;
-      const from = head.i + (head.separate ? 2 : 1);
+      const from = head.i + (head.separate ? Number(head.nameOffset || 1) + 1 : 1);
       const block = lines.slice(from, end);
       const joined = block.join(" ");
       const h = ensureHorse(head.umaban, head.name);
@@ -3347,13 +3358,24 @@ export default function NARPredictionTool() {
 
   const applyScanTexts = (jumpToResults = false) => {
     let next=scanText.race ? [] : horses.map(h=>({...h}));
+    // 先に馬の母体を作る。詳細(form)を先に解析すると、馬がまだ存在せず脚質が全件未取得になるため順序を固定。
     if(scanText.race) next=parseRaceText(scanText.race,next);
-    if(scanText.pace) next=parsePaceText(scanText.pace,next) || next;
-    if(scanText.form) next=parseFormText(scanText.form,next);
     if(scanText.standard) next=parseIndexText(scanText.standard,next,false);
     if(scanText.recent) next=parseIndexText(scanText.recent,next,true);
+    if(scanText.form) next=parseFormText(scanText.form,next);
+    if(scanText.pace) next=parsePaceText(scanText.pace,next) || next;
     if(scanText.training) next=parseTrainingText(scanText.training,next);
     if(scanText.comment) next=parseCommentText(scanText.comment,next);
+    // 今回レースの取消・除外は指数テキスト側で再追加されても最終予想対象から外す。
+    const inactive = new Set();
+    if (scanText.race) {
+      const rl = String(scanText.race).replace(/\r/g, "").split("\n").map(x=>x.trim()).filter(Boolean);
+      for (let i=0;i<rl.length;i+=1) if (/^\d{1,2}$/.test(rl[i])) {
+        const n=rl[i]; const look=rl.slice(i+1,i+4).join(" ");
+        if (/取消|除外/.test(look)) inactive.add(String(n));
+      }
+    }
+    next = next.filter((h)=>!inactive.has(String(h.umaban)));
     setHorses(next);
     flash(`${next.filter((h)=>h.name && h.umaban).length}頭へテキストを反映しました`);
     if (jumpToResults) setTimeout(()=>document.getElementById("result-section")?.scrollIntoView({behavior:"smooth",block:"start"}),80);

@@ -218,6 +218,9 @@ export default function NARPredictionTool() {
   const [resultOrderInput, setResultOrderInput] = useState("");
   const [learningHistory, setLearningHistory] = useState<any[]>([]);
   const [flowFocusId, setFlowFocusId] = useState<string>("");
+  const [horseDbOpen, setHorseDbOpen] = useState(false);
+  const [horseDbQuery, setHorseDbQuery] = useState("");
+  const [horseDbSelected, setHorseDbSelected] = useState<string>("");
 
   // ---- 永続化 ----
   useEffect(() => {
@@ -2013,6 +2016,54 @@ export default function NARPredictionTool() {
     flash("Azure解析JSONを書き出しました");
   };
 
+  // ---- 馬データベース（保存済みレースから自動生成） ----
+  // 別ストレージへ複製せず nar-saved-races を正本にするため、既存バックアップとの互換性を保つ。
+  const normalizeHorseDbName = (v:any) => String(v || "").replace(/[\s　]+/g, "").trim();
+  const horseDatabase = useMemo(() => {
+    const map = new Map<string, any>();
+    savedRaces.forEach((race:any) => {
+      (race.horses || []).forEach((h:any) => {
+        const name = normalizeHorseDbName(h.name);
+        if (!name || !isUsableHorseName(name)) return;
+        // 現行保存データには恒久的な馬IDがないため、馬名を主キーにする。
+        const key = name;
+        if (!map.has(key)) map.set(key, { key, name, starts:0, completed:0, wins:0, seconds:0, thirds:0, top3:0, marks:{}, tracks:{}, distances:{}, jockeys:{}, records:[] });
+        const d = map.get(key);
+        d.starts += 1;
+        const f = num(h.finish);
+        const completed = race.status === "completed";
+        if (completed) {
+          d.completed += 1;
+          if (f === 1) d.wins += 1;
+          if (f === 2) d.seconds += 1;
+          if (f === 3) d.thirds += 1;
+          if (f !== null && f >= 1 && f <= 3) d.top3 += 1;
+        }
+        const mark = String(h.mark || h._autoMark || "").trim();
+        if (mark) d.marks[mark] = (d.marks[mark] || 0) + 1;
+        const tr = String(race.track || "-"); d.tracks[tr] = (d.tracks[tr] || 0) + 1;
+        const dk = `${race.track || "-"}${race.distance || "-"}m`; d.distances[dk] = (d.distances[dk] || 0) + 1;
+        const jk = String(h.jockey || "").trim(); if (jk) d.jockeys[jk] = (d.jockeys[jk] || 0) + 1;
+        d.records.push({
+          raceId: race.id, savedAt: race.savedAt || race.updatedAt || "", track: race.track || "", raceNo: race.raceNo || race.raceName || "",
+          distance: race.distance || "", going: race.going || "", paceType: race.paceType || "", status: race.status || "pending",
+          finish: f !== null && f >= 1 && f <= 3 ? f : (completed ? "着外" : "結果待ち"), mark,
+          predictedScore: num(h.predictedScore ?? h._finalScore), odds: h.odds || "", ninki: h.ninki || "", jockey: h.jockey || "",
+          runningStyle: h.runningStyle || "", recentIndex: num(h._recentIndex ?? h.avg5), best: num(h.best), avg5: num(h.avg5), dist: num(h.dist), course: num(h.course),
+          sexAge: h.sexAge || "", weight: h.weight || "", bodyWeight: h.bodyWeight || "", bodyDiff: h.bodyDiff ?? ""
+        });
+      });
+    });
+    return Array.from(map.values()).map((d:any) => ({...d, records:d.records.sort((a:any,b:any)=>String(b.savedAt).localeCompare(String(a.savedAt)))})).sort((a:any,b:any)=>b.starts-a.starts || a.name.localeCompare(b.name,"ja"));
+  }, [savedRaces]);
+  const selectedHorseDb:any = horseDatabase.find((d:any)=>d.key===horseDbSelected) || null;
+  const downloadJsonFile = (filename:string, data:any) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
+    const url = URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  };
+  const exportHorseCard = (d:any) => downloadJsonFile(`nar-horse-${d.name}-${new Date().toISOString().slice(0,10)}.json`, {type:"nar-ai-horse-card", version:1, exportedAt:new Date().toISOString(), horse:d});
+  const exportAllHorseCards = () => downloadJsonFile(`nar-horse-database-${new Date().toISOString().slice(0,10)}.json`, {type:"nar-ai-horse-database", version:1, exportedAt:new Date().toISOString(), horses:horseDatabase});
+
   // ---- JSON入出力 ----
   const doExport = () => {
     const data = { raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength };
@@ -3306,6 +3357,7 @@ export default function NARPredictionTool() {
             ["result-section","③ 予想"],
             ["horses-section","④ 全頭"],
           ].map(([id,label])=><button key={id} onClick={()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"})} className="shrink-0 rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-[11px] font-black text-gray-700 active:bg-gray-200">{label}</button>)}
+          <button onClick={()=>{setHorseDbOpen(true); setTimeout(()=>document.getElementById("horse-db-section")?.scrollIntoView({behavior:"smooth",block:"start"}),0)}} className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-3 py-1.5 text-[11px] font-black text-violet-700">⑤ 馬DB</button>
           <div className="ml-auto shrink-0 text-[10px] font-bold text-gray-400">{track}{raceNo}R {distance?`${distance}m`:""}</div>
         </div>
       </div>
@@ -3383,6 +3435,7 @@ export default function NARPredictionTool() {
             <button onClick={saveResultAndLearn} className="rounded-xl bg-purple-700 px-4 py-3 text-sm font-black text-white shadow-sm">結果保存・学習</button>
           )}
           <button onClick={() => setSavedRacesOpen((v) => !v)} className="rounded-xl bg-slate-800 px-4 py-3 text-sm font-black text-white shadow-sm">保存済み {savedRaces.length ? `(${savedRaces.length})` : ""}</button>
+          <button onClick={() => setHorseDbOpen((v)=>!v)} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white shadow-sm">馬データベース ({horseDatabase.length})</button>
           {!resultEntryMode && <button onClick={autoCompleteCurrentHorses} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">不足項目を補完</button>}
           {resultEntryMode && <button onClick={() => setResultEntryMode(false)} className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-600">結果入力を閉じる</button>}
         </div>
@@ -3759,6 +3812,39 @@ export default function NARPredictionTool() {
             <button onClick={saveResultAndLearn} className="rounded-lg bg-purple-700 px-4 py-2.5 text-sm font-black text-white shadow-sm">結果保存・学習</button>
             <button onClick={() => setResultOrderInput("")} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-600">入力をクリア</button>
           </div>
+        </div>
+      )}
+
+      {horseDbOpen && (
+        <div id="horse-db-section" className="scroll-mt-28 mx-3 mt-3 rounded-2xl border border-violet-200 bg-white p-3 shadow-sm">
+          <div className="flex items-start justify-between gap-2">
+            <div><div className="font-black text-violet-950">🐎 馬データベース</div><div className="mt-0.5 text-[10px] text-slate-500">保存済み{savedRaces.length}Rから自動集計・{horseDatabase.length}頭。新しいレースを保存すると自動更新。</div></div>
+            <button onClick={()=>setHorseDbOpen(false)} className="text-xs text-slate-400">閉じる</button>
+          </div>
+          {!selectedHorseDb ? <>
+            <div className="mt-3 flex gap-2">
+              <input value={horseDbQuery} onChange={e=>setHorseDbQuery(e.target.value)} placeholder="馬名で検索" className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-violet-500" />
+              <button onClick={exportAllHorseCards} className="shrink-0 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] font-black text-violet-700">全頭JSON保存</button>
+            </div>
+            <div className="mt-3 max-h-[65vh] space-y-2 overflow-y-auto pr-1">
+              {horseDatabase.filter((d:any)=>!horseDbQuery.trim() || d.name.includes(horseDbQuery.trim())).map((d:any)=><button key={d.key} onClick={()=>setHorseDbSelected(d.key)} className="w-full rounded-xl border border-slate-200 p-3 text-left active:bg-violet-50">
+                <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-black text-slate-900">{d.name}</span><span className="shrink-0 rounded-full bg-violet-100 px-2 py-1 text-[10px] font-black text-violet-700">保存 {d.starts}R</span></div>
+                <div className="mt-1 text-[10px] text-slate-500">結果済 {d.completed}R　1着 {d.wins} / 2着 {d.seconds} / 3着 {d.thirds}　複勝率 {d.completed?`${(d.top3/d.completed*100).toFixed(1)}%`:"-"}</div>
+              </button>)}
+            </div>
+          </> : <>
+            <div className="mt-3 flex items-center justify-between gap-2"><button onClick={()=>setHorseDbSelected("")} className="rounded-lg border border-slate-200 px-3 py-2 text-[11px] font-bold text-slate-600">← 一覧</button><button onClick={()=>exportHorseCard(selectedHorseDb)} className="rounded-lg bg-violet-700 px-3 py-2 text-[11px] font-black text-white">この馬をJSON保存</button></div>
+            <div className="mt-3 rounded-2xl bg-violet-50 p-4">
+              <div className="text-xl font-black text-violet-950">{selectedHorseDb.name}</div>
+              <div className="mt-1 text-xs text-violet-700">保存履歴 {selectedHorseDb.starts}R / 結果済 {selectedHorseDb.completed}R</div>
+              <div className="mt-3 grid grid-cols-4 gap-2 text-center"><div><div className="text-lg font-black">{selectedHorseDb.wins}</div><div className="text-[9px] text-slate-500">1着</div></div><div><div className="text-lg font-black">{selectedHorseDb.seconds}</div><div className="text-[9px] text-slate-500">2着</div></div><div><div className="text-lg font-black">{selectedHorseDb.thirds}</div><div className="text-[9px] text-slate-500">3着</div></div><div><div className="text-lg font-black">{selectedHorseDb.completed?`${(selectedHorseDb.top3/selectedHorseDb.completed*100).toFixed(0)}%`:"-"}</div><div className="text-[9px] text-slate-500">複勝率</div></div></div>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {[['会場',selectedHorseDb.tracks],['会場×距離',selectedHorseDb.distances],['騎手',selectedHorseDb.jockeys]].map(([label,obj]:any)=><div key={label} className="rounded-xl border border-slate-200 p-3"><div className="text-[11px] font-black text-slate-700">{label}</div><div className="mt-1 space-y-1 text-[10px] text-slate-500">{Object.entries(obj).sort((a:any,b:any)=>b[1]-a[1]).slice(0,8).map(([k,v]:any)=><div key={k} className="flex justify-between gap-2"><span>{k}</span><b>{v}R</b></div>)}</div></div>)}
+            </div>
+            <div className="mt-3"><div className="text-xs font-black text-slate-800">保存レース履歴</div><div className="mt-2 space-y-2">{selectedHorseDb.records.map((r:any,i:number)=><div key={`${r.raceId}-${i}`} className="rounded-xl border border-slate-200 p-3"><div className="flex items-center justify-between gap-2"><b className="text-xs">{r.track}{r.raceNo}R {r.distance}m</b><span className={`rounded px-2 py-0.5 text-[10px] font-black ${r.finish===1?'bg-rose-100 text-rose-700':r.finish===2?'bg-blue-100 text-blue-700':r.finish===3?'bg-amber-100 text-amber-700':'bg-slate-100 text-slate-500'}`}>{typeof r.finish==='number'?`${r.finish}着`:r.finish}</span></div><div className="mt-1 text-[10px] text-slate-500">{r.savedAt?new Date(r.savedAt).toLocaleDateString('ja-JP'):''}　AI {r.mark||'—'}　総合 {r.predictedScore!==null?r.predictedScore.toFixed(1):'-'}　{r.ninki||'-'}人気 / {r.odds||'-'}倍</div><div className="mt-1 text-[10px] text-slate-400">騎手 {r.jockey||'-'}　脚質 {r.runningStyle||'-'}　近5走 {r.recentIndex!==null?r.recentIndex.toFixed(1):'-'}　馬場 {r.going||'-'}　展開 {r.paceType||'-'}</div></div>)}</div></div>
+            <div className="mt-3 rounded-xl bg-amber-50 p-3 text-[10px] leading-relaxed text-amber-800">現在の結果入力は1〜3着のみ保存する仕様なので、4着以下は正確な着順ではなく「着外」と表示します。過去データを捏造せず、保存されている範囲だけを集計しています。</div>
+          </>}
         </div>
       )}
 

@@ -2655,6 +2655,62 @@ export default function NARPredictionTool() {
         }
       }
 
+      // 船橋専用の距離別コース補正。船橋以外では必ず0点。
+      // 固定の「枠だけボーナス」ではなく、脚質・枠・近走通過順を組み合わせて小幅に反映する。
+      // スパイラルカーブは1200/1600/1800mで「好位～差しが4角で動ける」要素として扱い、
+      // 近走で実際に位置を上げた履歴がある馬だけ追加評価する。
+      let funabashiAdj = 0;
+      let funabashiReason = "";
+      if (normalizeTrackName(track) === "船橋") {
+        const d = normalizeDistanceValue(distance);
+        const horseNo = Number(h.umaban) || 0;
+        const fieldN = Math.max(1, parsed.filter((x:any)=>Number(x.umaban)>0).length);
+        const outer = horseNo > 0 ? horseNo / Math.max(fieldN, horseNo) : 0.5;
+        const inner = 1 - outer;
+        const style = String(h.runningStyle || "");
+        const forward = style === "逃" ? 1 : style === "先" ? 0.78 : style === "自在" ? 0.48 : style === "差" ? 0.24 : 0;
+        const closer = style === "差" ? 1 : style === "追" ? 0.82 : style === "自在" ? 0.52 : style === "先" ? 0.18 : 0;
+        const posRuns = Array.isArray(h.recentPositions) ? h.recentPositions.slice(0,5) : [];
+        let gainSum = 0, gainW = 0;
+        posRuns.forEach((r:any,i:number)=>{
+          const ps=(Array.isArray(r.positions)?r.positions:[]).map((x:any)=>Number(x)).filter((x:number)=>Number.isFinite(x)&&x>0);
+          if(ps.length<2) return;
+          const fs=Number(r.fieldSize)||Math.max(...ps,fieldN);
+          if(fs<=1) return;
+          const gain=(ps[0]-ps[ps.length-1])/(fs-1);
+          const w=(sameTrackName(r.track,"船橋")&&sameDistanceValue(r.distance,d)?1.5:sameTrackName(r.track,"船橋")?1.2:1)/(1+i*0.2);
+          gainSum+=gain*w; gainW+=w;
+        });
+        const moveUp = gainW ? clamp(gainSum/gainW,-0.4,0.4) : 0;
+        if (d === 1000) {
+          funabashiAdj = forward*1.15 + (style==="逃"?0.45:0) - closer*0.35;
+          funabashiReason = "船橋1000m:逃げ・先行重視";
+        } else if (d === 1200) {
+          funabashiAdj = outer*0.55 + forward*0.70 + closer*0.28 + Math.max(0,moveUp)*0.85;
+          funabashiReason = "船橋1200m:外枠＋先行、差し進出も評価";
+        } else if (d === 1500) {
+          funabashiAdj = inner*0.62 + forward*0.78 - (outer>0.75?0.18:0);
+          funabashiReason = "船橋1500m:内枠＋先行重視";
+        } else if (d === 1600) {
+          // 枠差はほぼ付けず、能力値と位置取りの再現性を優先。
+          const ability = base!==null && raceAvg.recent!==null ? clamp((base-raceAvg.recent)/18,-0.45,0.55) : 0;
+          funabashiAdj = ability*0.75 + forward*0.25 + closer*0.22 + Math.max(0,moveUp)*0.70;
+          funabashiReason = "船橋1600m:枠より能力・位置取り";
+        } else if (d === 1800) {
+          funabashiAdj = forward*0.42 + closer*0.42 + Math.max(0,moveUp)*0.62;
+          funabashiReason = "船橋1800m:先行・差し双方を評価";
+        } else if (d === 2200) {
+          // 長距離はスタート直後の位置取りを、脚質と追走指数で近似。
+          const startPos = h._start!==null && raceAvg.start!==null ? clamp((h._start-raceAvg.start)/20,-0.5,0.5) : 0;
+          funabashiAdj = forward*0.48 + startPos*0.75 + inner*0.20;
+          funabashiReason = "船橋2200m:スタート直後の位置取り重視";
+        } else if (d === 2400) {
+          funabashiAdj = inner*0.68 + forward*0.72 - (style==="追"?0.18:0);
+          funabashiReason = "船橋2400m:内枠＋先行重視";
+        }
+        funabashiAdj = clamp(funabashiAdj, -1.2, 1.8);
+      }
+
       // オッズは「予想」ではなく市場とのズレ検出が主。スコア補正は有効時でも小さくする。
       let oddsBonus = 0;
       if (oddsOn && h._odds !== null && h._odds > 0 && raceAvg.oddsLog !== null) {
@@ -2663,13 +2719,13 @@ export default function NARPredictionTool() {
 
       const coreKnown = [h._best, recentIndex ?? h._avg5, h._dist, h._course].filter((v)=>v!==null).length;
       const reliabilityAdj = base === null ? 0 : -(4-coreKnown)*0.22;
-      const contextAdj = clamp(recentAdj + transferAdj + paceAdj + jockeyAdj + styleCourseAdj + trainingAdj + commentAdj + layoffAdj + bodyAdj + formAdj + reliabilityAdj, -10, 10);
+      const contextAdj = clamp(recentAdj + transferAdj + paceAdj + jockeyAdj + styleCourseAdj + trainingAdj + commentAdj + layoffAdj + bodyAdj + formAdj + reliabilityAdj + funabashiAdj, -10, 10);
       const finalScore = base !== null ? base + contextAdj + oddsBonus : null;
 
       return {
         ...h, _distVal:distVal, _courseVal:courseVal, _base:base, _recentIndex:recentIndex, _recentMeta:h._recentMeta,
         _recentAdj:recentAdj, _transferAdj:transferAdj, _transferLearn:transferLearn, _paceAdj:paceAdj, _jockeyLearnAdj:jockeyAdj, _jockeySample:learnedJockey.n,
-        _styleCourseAdj:styleCourseAdj, _formAdj:formAdj, _reliabilityAdj:reliabilityAdj, _oddsBonus:oddsBonus,
+        _styleCourseAdj:styleCourseAdj, _funabashiAdj:funabashiAdj, _funabashiReason:funabashiReason, _formAdj:formAdj, _reliabilityAdj:reliabilityAdj, _oddsBonus:oddsBonus,
         _trainingScore:training100, _commentScore:comment100, _commentAdj:commentAdj, _contextAdj:contextAdj, _finalScore:finalScore,
       };
     });
@@ -3539,7 +3595,7 @@ export default function NARPredictionTool() {
             <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は頭取り補正、▲△☆は過去の3着内実績でヒモ候補だけ小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
             <div className="space-y-2 sm:hidden">
               {raceAnalytics.marked.map((h)=><div key={`marked-card-${h.id}`} className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span><span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
+                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span>{normalizeTrackName(track)==="船橋"&&Math.abs(Number(h._funabashiAdj||0))>=0.05&&<span className="text-cyan-700">船橋補正 {h._funabashiAdj>0?"+":""}{Number(h._funabashiAdj).toFixed(1)}</span>}<span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
               </div>)}
             </div>
             <div className="hidden overflow-x-auto sm:block">

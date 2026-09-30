@@ -2325,9 +2325,9 @@ export default function NARPredictionTool() {
       const statAdj = (st:any) => !st?.n ? 0 : clamp((st.sum / st.n) * sampleStrength(st.n), -2.5, 2.5);
       if (e?.n >= 5) {
         const ef = sampleStrength(e.n);
-        const exactAdj = statAdj(e);
+        const exactRaw = e.sum / e.n;
         const globalAdj = statAdj(g);
-        return { adj: exactAdj * ef + globalAdj * (1-ef), n:e.n, globalN:g?.n || 0 };
+        return { adj: clamp(exactRaw * ef + globalAdj * (1-ef), -2.5, 2.5), n:e.n, globalN:g?.n || 0 };
       }
       return { adj: statAdj(g), n:e?.n || 0, globalN:g?.n || 0 };
     };
@@ -2393,6 +2393,44 @@ export default function NARPredictionTool() {
     const isJraTransfer = transferStage >= 1 && transferStage <= 3;
     return { runs, weighted, jraWeighted, narWeighted, sd, stabilityAdj, sameCount, sameConditionAdj, isJraTransfer, transferStage, jraCount, narCount, currentVenueRuns };
   };
+
+  // ---- 実通過順位ベースの脚質プロファイル ----
+  const effectiveStyleOf = (horse:any) => {
+    const styles:any = { "逃":0, "先":0, "差":0, "追":0 };
+    const runs = Array.isArray(horse?.recentPositions) ? horse.recentPositions.slice(0,5) : [];
+    runs.forEach((r:any,i:number) => {
+      const ps=(Array.isArray(r.positions)?r.positions:[]).map((x:any)=>Number(x)).filter((x:number)=>Number.isFinite(x)&&x>0);
+      if(!ps.length) return;
+      const fs=Math.max(6, Number(r.fieldSize)||Math.max(...ps,12));
+      const early=ps[0], ratio=early/fs;
+      const style=early===1||ratio<=0.14?"逃":ratio<=0.36?"先":ratio<=0.68?"差":"追";
+      const cond=sameTrackDistance(r.track,r.distance,track,distance)?2.20:sameTrackName(r.track,track)?1.45:sameDistanceValue(r.distance,distance)?1.15:0.85;
+      const rec=[1.55,1.30,1.10,0.94,0.80][i]||0.75; styles[style]+=cond*rec;
+    });
+    const explicit=String(horse?.runningStyle||"");
+    if(Object.prototype.hasOwnProperty.call(styles,explicit)) styles[explicit]+=0.75;
+    const ordered=Object.entries(styles).sort((a:any,b:any)=>Number(b[1])-Number(a[1]));
+    const total=ordered.reduce((a:any,x:any)=>a+Number(x[1]),0);
+    if(!total) return { style:explicit, confidence:0, probabilities:styles, evidence:0 };
+    const top:any=ordered[0], second:any=ordered[1]; let style=String(top[0]);
+    if(Number(second?.[1]||0)/Math.max(0.001,Number(top[1]))>=0.86 && [style,String(second?.[0])].some(x=>x==="逃"||x==="先") && [style,String(second?.[0])].some(x=>x==="差"||x==="追")) style="自在";
+    const probs:any={}; Object.entries(styles).forEach(([k,v]:any)=>probs[k]=Number(v)/total);
+    return { style, confidence:Math.round(Number(top[1])/total*100), probabilities:probs, evidence:runs.length };
+  };
+
+  // ---- 会場×距離ごとのAI信頼度 ----
+  const conditionReliability = useMemo(() => {
+    const rows=savedRaces.filter((r:any)=>r.status==="completed" && sameTrackDistance(r.track,r.distance,track,distance) && resultTop3Of(r).length===3);
+    let n=0, win=0, place=0, favWin=0, favN=0;
+    rows.forEach((r:any)=>{
+      const ordered=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      if(!ordered.length)return; n++; const f=num(ordered[0].finish); if(f===1)win++; if(f!==null&&f<=3)place++;
+      const fav=(r.horses||[]).find((h:any)=>num(h.ninki)===1); if(fav){favN++; if(num(fav.finish)===1)favWin++;}
+    });
+    const winRate=n?win/n:0, placeRate=n?place/n:0, favWinRate=favN?favWin/favN:0; let shrink=1;
+    if(n>=8){ if(winRate<0.18||placeRate<0.42)shrink=0.62; else if(winRate<0.23||placeRate<0.50)shrink=0.76; else if(winRate<0.28||placeRate<0.56)shrink=0.88; }
+    return {n,winRate,placeRate,favWinRate,shrink};
+  },[savedRaces,track,distance]);
 
   // ---- ◎/○の最終順位補正 ----
   // 保存済み結果から「素点1位・2位のどちらが実際に勝ちやすかったか」を学習する。
@@ -2532,8 +2570,9 @@ export default function NARPredictionTool() {
   const computed = useMemo(() => {
     const parsed = horses.map((h) => {
       const recentMeta = recentConditionMeta(h);
+      const styleProfile = effectiveStyleOf(h);
       return {
-        ...h,
+        ...h, runningStyle: styleProfile.style || h.runningStyle || "", _styleProfile: styleProfile,
         _best: num(h.best), _start: num(h.start), _oikake: num(h.oikake), _agari: num(h.agari),
         _avg5: num(h.avg5), _dist: num(h.dist), _course: num(h.course), _r3: num(h.r3), _r2: num(h.r2), _r1: num(h.r1),
         _odds: num(h.odds), _jockeyIndex: num(h.jockeyIndex), _bodyChange: bodyChangeNum(h.bodyChange), _paceForecast: num(h.paceForecast), _recentMeta: recentMeta,
@@ -2719,26 +2758,34 @@ export default function NARPredictionTool() {
 
       const coreKnown = [h._best, recentIndex ?? h._avg5, h._dist, h._course].filter((v)=>v!==null).length;
       const reliabilityAdj = base === null ? 0 : -(4-coreKnown)*0.22;
-      const contextAdj = clamp(recentAdj + transferAdj + paceAdj + jockeyAdj + styleCourseAdj + trainingAdj + commentAdj + layoffAdj + bodyAdj + formAdj + reliabilityAdj + funabashiAdj, -10, 10);
-      const finalScore = base !== null ? base + contextAdj + oddsBonus : null;
+      const rawContextAdj = clamp(recentAdj + transferAdj + paceAdj + jockeyAdj + styleCourseAdj + trainingAdj + commentAdj + layoffAdj + bodyAdj + formAdj + reliabilityAdj + funabashiAdj, -10, 10);
+      const contextAdj = rawContextAdj * conditionReliability.shrink;
+      const abilityScore = base !== null ? base + contextAdj : null;
+      const valueScore = h._odds !== null && h._odds > 0 && abilityScore !== null ? Math.log1p(h._odds) : null;
+      const finalScore = abilityScore; // 妙味(オッズ)は能力順位から分離
 
       return {
-        ...h, _distVal:distVal, _courseVal:courseVal, _base:base, _recentIndex:recentIndex, _recentMeta:h._recentMeta,
+        ...h, _distVal:distVal, _courseVal:courseVal, _base:base, _abilityScore:abilityScore, _valueScore:valueScore, _recentIndex:recentIndex, _recentMeta:h._recentMeta,
         _recentAdj:recentAdj, _transferAdj:transferAdj, _transferLearn:transferLearn, _paceAdj:paceAdj, _jockeyLearnAdj:jockeyAdj, _jockeySample:learnedJockey.n,
         _styleCourseAdj:styleCourseAdj, _funabashiAdj:funabashiAdj, _funabashiReason:funabashiReason, _formAdj:formAdj, _reliabilityAdj:reliabilityAdj, _oddsBonus:oddsBonus,
         _trainingScore:training100, _commentScore:comment100, _commentAdj:commentAdj, _contextAdj:contextAdj, _finalScore:finalScore,
       };
     });
-  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning]);
+  }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning, conditionReliability]);
 
   const ranked = useMemo(() => {
     // まず素点順位を作り、その1・2位だけ過去の「頭取り」実績で小幅補正。
     const rawSorted = computed.filter((h) => h._finalScore !== null).slice().sort((a,b)=>b._finalScore-a._finalScore);
     const rawRank = new Map(rawSorted.map((h,i)=>[h.id,i+1]));
+    const rawTop:any=rawSorted[0];
+    const fav:any=computed.filter((h:any)=>num(h.ninki)===1&&h._finalScore!==null).sort((a:any,b:any)=>b._finalScore-a._finalScore)[0];
+    const favGap=rawTop&&fav?Number(rawTop._finalScore)-Number(fav._finalScore):99;
+    const marketAnchor=fav&&rawTop&&String(fav.id)!==String(rawTop.id)&&favGap>=0&&favGap<=3.5?clamp((3.5-favGap)/3.5*1.1,0,1.1):0;
     const calibrated = computed.map((h:any)=>{
       const rr = rawRank.get(h.id) || 99;
       const headAdj = h._finalScore === null ? 0 : headRankCalibration.adjust(rr);
-      return { ...h, _rawScore:h._finalScore, _headAdj:headAdj, _selectionScore:h._finalScore===null?null:h._finalScore+headAdj };
+      const marketAdj=fav&&String(h.id)===String(fav.id)?marketAnchor:0;
+      return { ...h, _rawScore:h._finalScore, _headAdj:headAdj, _marketAnchorAdj:marketAdj, _selectionScore:h._finalScore===null?null:h._finalScore+headAdj+marketAdj };
     });
 
     // ◎○を確定したあと、3番手以下だけヒモ学習で並べ替える。頭候補は絶対にこの処理で変えない。

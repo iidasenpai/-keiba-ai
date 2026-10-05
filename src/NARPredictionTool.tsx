@@ -2773,19 +2773,51 @@ export default function NARPredictionTool() {
     });
   }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning, conditionReliability]);
 
+  // ---- WIN / PLACE 分離モデル v10.1 ----
+  // 保存済み結果の「予測順位→1着率/3着内率」を時系列実績から推定する。
+  // 小標本の会場×距離は全体へ縮小し、人気は能力値そのものではなく勝ち切り判定の安全弁にだけ使う。
+  const winPlaceCalibration = useMemo(() => {
+    const mk=()=>Array.from({length:16},()=>({n:0,win:0,place:0}));
+    const global=mk(), exact=mk();
+    const completed=savedRaces.filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3);
+    const consume=(r:any, arr:any[])=>{
+      const ordered=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>Number(b.predictedScore)-Number(a.predictedScore));
+      ordered.slice(0,15).forEach((h:any,i:number)=>{ const st=arr[i+1]; const f=num(h.finish); st.n++; if(f===1)st.win++; if(f!==null&&f<=3)st.place++; });
+    };
+    completed.forEach((r:any)=>{ consume(r,global); if(sameTrackDistance(r.track,r.distance,track,distance)) consume(r,exact); });
+    const rate=(rank:number,key:'win'|'place')=>{
+      const g=global[Math.min(15,Math.max(1,rank))], e=exact[Math.min(15,Math.max(1,rank))];
+      const prior=key==='win'?0.10:0.30;
+      const gr=(g[key]+prior*12)/(g.n+12);
+      const er=(e[key]+gr*10)/(e.n+10);
+      const strength=e.n<5?0:e.n<10?0.25:e.n<20?0.50:Math.min(0.85,0.65+(e.n-20)*0.01);
+      return gr*(1-strength)+er*strength;
+    };
+    return { rate, global, exact };
+  },[savedRaces,track,distance]);
+
   const ranked = useMemo(() => {
-    // まず素点順位を作り、その1・2位だけ過去の「頭取り」実績で小幅補正。
+    // WIN（1着）とPLACE（3着内）を分離。印の◎○はWINを優先し、▲以下はPLACEも使う。
     const rawSorted = computed.filter((h) => h._finalScore !== null).slice().sort((a,b)=>b._finalScore-a._finalScore);
     const rawRank = new Map(rawSorted.map((h,i)=>[h.id,i+1]));
     const rawTop:any=rawSorted[0];
     const fav:any=computed.filter((h:any)=>num(h.ninki)===1&&h._finalScore!==null).sort((a:any,b:any)=>b._finalScore-a._finalScore)[0];
     const favGap=rawTop&&fav?Number(rawTop._finalScore)-Number(fav._finalScore):99;
-    const marketAnchor=fav&&rawTop&&String(fav.id)!==String(rawTop.id)&&favGap>=0&&favGap<=3.5?clamp((3.5-favGap)/3.5*1.1,0,1.1):0;
+    const favRawRank=fav ? (rawRank.get(fav.id)||99) : 99;
+    // 1人気を4位以下へ落とす場合は再監査。差が小さい時だけ最大+2.4点で救済し、人気だけで◎固定にはしない。
+    const marketAnchor=fav&&rawTop&&String(fav.id)!==String(rawTop.id)&&favRawRank>=4&&favGap>=0&&favGap<=6
+      ? clamp((6-favGap)/6*2.4,0,2.4) : 0;
     const calibrated = computed.map((h:any)=>{
       const rr = rawRank.get(h.id) || 99;
       const headAdj = h._finalScore === null ? 0 : headRankCalibration.adjust(rr);
       const marketAdj=fav&&String(h.id)===String(fav.id)?marketAnchor:0;
-      return { ...h, _rawScore:h._finalScore, _headAdj:headAdj, _marketAnchorAdj:marketAdj, _selectionScore:h._finalScore===null?null:h._finalScore+headAdj+marketAdj };
+      const winRate=rr<99?winPlaceCalibration.rate(rr,'win'):0;
+      const placeRate=rr<99?winPlaceCalibration.rate(rr,'place'):0;
+      // 能力点を壊さない範囲で、過去の順位別勝率/複勝率を別スコアとして付与。
+      const winAdj=clamp((winRate-0.10)*8,-1.2,1.8);
+      const placeAdj=clamp((placeRate-0.30)*4,-0.8,1.2);
+      const selection=h._finalScore===null?null:h._finalScore+headAdj+marketAdj+winAdj;
+      return { ...h, _rawScore:h._finalScore, _headAdj:headAdj, _marketAnchorAdj:marketAdj, _winRate:winRate, _placeRate:placeRate, _winAdj:winAdj, _placeAdj:placeAdj, _winScore:selection, _placeScore:h._finalScore===null?null:h._finalScore+placeAdj, _selectionScore:selection };
     });
 
     // ◎○を確定したあと、3番手以下だけヒモ学習で並べ替える。頭候補は絶対にこの処理で変えない。
@@ -2794,7 +2826,9 @@ export default function NARPredictionTool() {
     const withHimo = calibrated.map((h:any) => {
       const rr = headRank.get(String(h.id)) || 99;
       const himoAdj = h._selectionScore === null || rr < 3 ? 0 : himoLearning.adjust(h, rr);
-      return { ...h, _preHimoRank: rr < 99 ? rr : null, _himoAdj:himoAdj, _himoScore:h._selectionScore===null?null:h._selectionScore+himoAdj };
+      // 3番手以下はPLACE側を混ぜ、勝ち切り候補と連下候補を同じ物差しにしない。
+      const placeBlend = rr < 3 ? 0 : Number(h._placeAdj||0);
+      return { ...h, _preHimoRank: rr < 99 ? rr : null, _himoAdj:himoAdj, _himoScore:h._selectionScore===null?null:h._selectionScore+himoAdj+placeBlend };
     });
     const byId = new Map(withHimo.map((h:any)=>[String(h.id), h]));
     const fixedTop2 = headSorted.slice(0,2).map((h:any)=>byId.get(String(h.id))).filter(Boolean);
@@ -2808,7 +2842,7 @@ export default function NARPredictionTool() {
       const autoMark = idx !== undefined && idx < marks.length ? marks[idx] : "";
       return { ...h, _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
-  }, [computed, headRankCalibration, himoLearning]);
+  }, [computed, headRankCalibration, himoLearning, winPlaceCalibration]);
 
   // ---- AI展開予想図 β2 ----
   // 位置取りを静的に並べるのではなく、
@@ -3392,11 +3426,19 @@ export default function NARPredictionTool() {
     let canLearn=false;
     let changes:Record<string,number>={};
     if(learningProcessed){
-      const learnedResult=learnFromRace(raceHorses, paceType, learned);
-      changes=learnedResult.changes;
-      canLearn=Object.keys(changes).length>0;
-      if(canLearn) setLearned(learnedResult.next);
-      // 学習値が動かなかったレースも「比較処理済み」として1Rに数える。
+      // v10.1: 1レースごとにグローバル重みを揺らさない。20Rごとの境界だけ再推定する。
+      const completedBefore=savedRaces.filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3).length;
+      const batchBoundary=((completedBefore+1)%20)===0;
+      if(batchBoundary){
+        const chronological=[...savedRaces].filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3).reverse();
+        chronological.push({horses:raceHorses,paceType});
+        let batchNext:any={...DEFAULT_LEARNED};
+        chronological.forEach((r:any)=>{ const res=learnFromRace(r.horses||[],r.paceType||'M',batchNext); batchNext=res.next; });
+        Object.keys(DEFAULT_LEARNED).forEach((k)=>{ const d=Number(batchNext[k]??1)-Number(learned[k]??1); if(Math.abs(d)>=0.0001) changes[k]=Number(d.toFixed(4)); });
+        canLearn=Object.keys(changes).length>0;
+        if(canLearn) setLearned(batchNext);
+      }
+      // 結果比較は毎R記録するが、重み更新は20Rごと。
       setHistoryCount((n)=>n+1);
       setLearningHistory((prev)=>[{
         raceId,
@@ -3423,7 +3465,7 @@ export default function NARPredictionTool() {
       setSavedRaces(nextSavedRaces);
       setResultEntryMode(false);
       setSavedRacesOpen(true);
-      flash(learningProcessed ? (canLearn ? `結果${order.join("-")}を保存し、${Object.keys(changes).length}項目を学習しました` : `結果${order.join("-")}を保存し、学習処理済み（重み変更なし）`) : `結果${order.join("-")}を保存しました`);
+      flash(learningProcessed ? (canLearn ? `結果${order.join("-")}を保存し、20Rバッチで${Object.keys(changes).length}項目を更新しました` : `結果${order.join("-")}を保存しました（重みは20R単位で更新）`) : `結果${order.join("-")}を保存しました`);
     } catch (e) {
       flash("結果の保存に失敗しました。全データ保存でバックアップしてください");
     }
@@ -3642,7 +3684,7 @@ export default function NARPredictionTool() {
             <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は頭取り補正、▲△☆は過去の3着内実績でヒモ候補だけ小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
             <div className="space-y-2 sm:hidden">
               {raceAnalytics.marked.map((h)=><div key={`marked-card-${h.id}`} className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span>{normalizeTrackName(track)==="船橋"&&Math.abs(Number(h._funabashiAdj||0))>=0.05&&<span className="text-cyan-700">船橋補正 {h._funabashiAdj>0?"+":""}{Number(h._funabashiAdj).toFixed(1)}</span>}<span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
+                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span className="text-rose-700">WIN <b>{h._winRate!==undefined?`${Math.round(Number(h._winRate)*100)}%`:"-"}</b></span><span className="text-emerald-700">PLACE <b>{h._placeRate!==undefined?`${Math.round(Number(h._placeRate)*100)}%`:"-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span>{normalizeTrackName(track)==="船橋"&&Math.abs(Number(h._funabashiAdj||0))>=0.05&&<span className="text-cyan-700">船橋補正 {h._funabashiAdj>0?"+":""}{Number(h._funabashiAdj).toFixed(1)}</span>}<span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
               </div>)}
             </div>
             <div className="hidden overflow-x-auto sm:block">

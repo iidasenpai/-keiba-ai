@@ -41,3 +41,9 @@
 
 `.github/workflows/deploy.yml` で Vite をビルドし、`dist` をGitHub Pagesへ公開します。
 GitHubの **Settings → Pages → Source** は **GitHub Actions** を選択してください。
+
+## v10.3
+- 南関4場・門別で調教評価を予想結果/全頭詳細に再表示
+- スマホで調教ランク・100点評価・補正値・メモを確認可能
+- 調教ランク手動変更時に100点評価も同期
+- 保存キー/既存レースデータは変更なし

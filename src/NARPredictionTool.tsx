@@ -2846,6 +2846,43 @@ export default function NARPredictionTool() {
     });
   }, [computed, headRankCalibration, himoLearning, winPlaceCalibration]);
 
+  // ---- 新旧モデル並行検証（実験版 / 保存データは読み取り専用） ----
+  // 発走前に保存されたスコアを基準にし、人気・近走情報の補正を比較する。
+  // 過去の結果を特徴量へ入れず、欠損項目は補正ゼロ。過去データを再学習・上書きしない。
+  const shadowComparison = useMemo(() => {
+    const safe = (v:any) => { const n=Number(v); return v===null||v===undefined||v===''||!Number.isFinite(n)?null:n; };
+    const candidate = (h:any, base:number, recentCenter:number|null) => {
+      const popularity=safe(h.ninki);
+      const recent=safe(h._recentIndex);
+      const recentAdj=recent!==null&&recentCenter!==null ? clamp((recent-recentCenter)*0.16,-4,4) : 0;
+      const marketAdj=popularity!==null&&popularity>=1 ? clamp(3.5-1.7*Math.log2(popularity),-2.5,3.5) : 0;
+      return base+recentAdj+marketAdj;
+    };
+    const evaluate=(race:any) => {
+      const all=(race.horses||[]).filter((h:any)=>safe(h.predictedScore??h._selectionScore??h._finalScore)!==null);
+      if(all.length<3)return null;
+      const winner=(race.horses||[]).find((h:any)=>safe(h.finish)===1);
+      if(!winner)return null;
+      const recentValues=all.map((h:any)=>safe(h._recentIndex)).filter((x:any)=>x!==null);
+      const center=recentValues.length?recentValues.reduce((a:number,b:number)=>a+b,0)/recentValues.length:null;
+      const original=all.slice().sort((a:any,b:any)=>Number(safe(b.predictedScore??b._selectionScore??b._finalScore))-Number(safe(a.predictedScore??a._selectionScore??a._finalScore)))[0];
+      const experimental=all.slice().sort((a:any,b:any)=>candidate(b,Number(safe(b.predictedScore??b._selectionScore??b._finalScore)),center)-candidate(a,Number(safe(a.predictedScore??a._selectionScore??a._finalScore)),center))[0];
+      const isWin=(h:any)=>String(h.umaban)===String(winner.umaban);
+      return {base:isWin(original),candidate:isWin(experimental),changed:String(original.umaban)!==String(experimental.umaban)};
+    };
+    const stats={races:0,baseWins:0,candidateWins:0,changed:0,missing:0};
+    savedRaces.filter((r:any)=>r.status==='completed').forEach((r:any)=>{
+      const e=evaluate(r);
+      if(!e){stats.missing++;return;}
+      stats.races++;if(e.base)stats.baseWins++;if(e.candidate)stats.candidateWins++;if(e.changed)stats.changed++;
+    });
+    const current=ranked.filter((h:any)=>safe(h._selectionScore??h._rawScore)!==null);
+    const recents=current.map((h:any)=>safe(h._recentIndex)).filter((x:any)=>x!==null);
+    const center=recents.length?recents.reduce((a:number,b:number)=>a+b,0)/recents.length:null;
+    const selected=current.slice().sort((a:any,b:any)=>candidate(b,Number(safe(b._selectionScore??b._rawScore)),center)-candidate(a,Number(safe(a._selectionScore??a._rawScore)),center))[0];
+    return {...stats,selected};
+  },[savedRaces,ranked]);
+
   // ---- AI展開予想図 β2 ----
   // 位置取りを静的に並べるのではなく、
   // スタート後 → 向正面 → 最終コーナー → ゴール前 と時間経過で進出/後退させる。
@@ -3936,6 +3973,19 @@ export default function NARPredictionTool() {
           結果学習を予想へ反映（処理済み {historyCount}レース）
         </label>
         <div className="text-[11px] text-gray-400 mt-1">解析後は「レースを保存」。レース終了後は「3-11-5」のように1〜3着の馬番だけ入力すると、自動回顧と学習を行います。</div>
+      </div>
+
+      <div className="mx-3 mt-3 rounded-xl border border-sky-200 bg-white p-3 shadow-sm">
+        <div className="font-black text-sky-900">🔬 新旧予想モデルの並行比較（試験運用）</div>
+        <div className="mt-1 text-[11px] text-gray-600">新モデルは近走指数と人気の補正を追加。現行の◎・学習設定・保存レースは変更しません。</div>
+        <div className="mt-2 grid grid-cols-3 gap-2 text-center text-xs">
+          <div className="rounded bg-gray-100 p-2"><div className="text-gray-500">比較可能</div><div className="font-black">{shadowComparison.races}R</div></div>
+          <div className="rounded bg-gray-100 p-2"><div className="text-gray-500">現行1着</div><div className="font-black">{shadowComparison.baseWins}勝</div></div>
+          <div className="rounded bg-sky-50 p-2"><div className="text-gray-500">新候補1着</div><div className="font-black">{shadowComparison.candidateWins}勝</div></div>
+        </div>
+        <div className="mt-2 text-xs">新候補の差分：<b>{shadowComparison.candidateWins-shadowComparison.baseWins>=0?'+':''}{shadowComparison.candidateWins-shadowComparison.baseWins}勝</b> ／ ◎が変わるレース：{shadowComparison.changed}R</div>
+        <div className="mt-1 text-xs">今回の新候補：<b>{shadowComparison.selected ? `${shadowComparison.selected.umaban}番 ${shadowComparison.selected.name}` : 'データ待ち'}</b>（参考表示のみ）</div>
+        <div className="mt-2 text-[10px] text-gray-500">※保存時スコアによる過去データ上の再順位付けです。欠損などで比較できない{shadowComparison.missing}Rは除外。未来情報の混入やスコア保存時点を完全には監査できないため、勝率改善を保証する検証ではありません。</div>
       </div>
 
       <div className="mx-3 mt-3 rounded-xl border border-violet-200 bg-white p-3 shadow-sm">

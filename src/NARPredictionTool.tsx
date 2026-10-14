@@ -248,9 +248,10 @@ export default function NARPredictionTool() {
   const committing = useRef(false);
   const automaticSave = useRef<Promise<void>|null>(null);
   const storageRevision = useRef(0);
+  const archiveWritten = useRef<any[]|null>(null);
   const [storageReady, setStorageReady] = useState(false);
   const live = useRef<any>({});
-  const currentState = { raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength };
+  const currentState = { raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength, scanText };
   live.current = { state: currentState, savedRaces };
   const learningRaces = useMemo(() => savedRaces.filter(r => r.status === 'completed' && !resultIssues(r).length).map(predictionView), [savedRaces]);
   const abVerification = useMemo(() => abSummary(savedRaces), [savedRaces]);
@@ -259,11 +260,13 @@ export default function NARPredictionTool() {
     if (new Set(nextRaces.map(r => r.id)).size !== nextRaces.length) throw new Error('保存IDの重複を検出しました');
     if (live.current.savedRaces.some((r: any) => !nextRaces.some(n => n.id === r.id))) throw new Error('既存レースを消す保存はできません');
     const revision = storageRevision.current;
-    const snapshot = { schemaVersion: 1, revision: revision+1, updatedAt: new Date().toISOString(), state, savedRaces: nextRaces };
-    const values:any = { [SNAPSHOT_KEY]: JSON.stringify(snapshot), 'nar-tool-state': JSON.stringify(state), 'nar-saved-races': JSON.stringify(nextRaces) };
-    if (migrationBackup.current) values['nar-pre-v11-migration-backup'] = JSON.stringify(migrationBackup.current);
+    const snapshot = { schemaVersion: 2, revision: revision+1, updatedAt: new Date().toISOString(), state, archiveKey:'nar-saved-races' };
+    const values:any = { [SNAPSHOT_KEY]: JSON.stringify(snapshot), 'nar-tool-state': JSON.stringify(state) };
+    if (archiveWritten.current !== nextRaces) values['nar-saved-races'] = JSON.stringify(nextRaces);
+    if (migrationBackup.current) values['nar-v11-migration-info'] = JSON.stringify(migrationBackup.current);
     await window.storage.setMany(values, revision);
     migrationBackup.current = null;
+    archiveWritten.current = nextRaces;
     storageRevision.current = revision+1;
     live.current = { state, savedRaces: nextRaces };
   };
@@ -273,12 +276,13 @@ export default function NARPredictionTool() {
     let cancelled = false;
     (async () => {
       try {
-        const canonical = await window.storage.get(SNAPSHOT_KEY);
+        const stored = await window.storage.getMany([SNAPSHOT_KEY,'nar-tool-state','nar-saved-races']);
+        const canonical = { value:stored[SNAPSHOT_KEY] };
         if (cancelled) return;
         const archive = canonical.value ? JSON.parse(canonical.value) : null;
-        if (archive && (archive.schemaVersion !== 1 || !Array.isArray(archive.savedRaces) || !archive.state)) throw new Error('一括保存データの形式が不正です');
+        if (archive && (![1,2].includes(archive.schemaVersion) || !archive.state || (archive.schemaVersion===1 && !Array.isArray(archive.savedRaces)) || (archive.schemaVersion===2 && archive.archiveKey!=='nar-saved-races'))) throw new Error('一括保存データの形式が不正です');
         storageRevision.current = Number(archive?.revision || 0);
-        const res = archive ? { value: JSON.stringify(archive.state) } : await window.storage.get("nar-tool-state");
+        const res = archive ? { value: JSON.stringify(archive.state) } : { value:stored['nar-tool-state'] };
         if (res && res.value) {
           const data = JSON.parse(res.value);
           if (data.raceName !== undefined) setRaceName(data.raceName);
@@ -294,20 +298,24 @@ export default function NARPredictionTool() {
           if (data.historyCount !== undefined) setHistoryCount(data.historyCount);
           if (Array.isArray(data.learningHistory)) setLearningHistory(data.learningHistory);
           if (data.horses) setHorses(data.horses);
+          if (data.scanText) setScanText(prev=>({...prev,...data.scanText}));
           if (data.weights) setWeights(Number(data.weights.avg5) >= 40 ? data.weights : { best: 15, avg5: 50, dist: 15, course: 20 });
           if (data.agariBonus !== undefined) setAgariBonus(data.agariBonus);
           if (data.oddsOn !== undefined) setOddsOn(data.oddsOn);
           if (data.decayScale !== undefined) setDecayScale(data.decayScale);
           if (data.oddsStrength !== undefined) setOddsStrength(data.oddsStrength);
         }
-        const saved = archive ? { value: JSON.stringify(archive.savedRaces) } : await window.storage.get("nar-saved-races");
+        const saved = archive?.schemaVersion===1 ? { value: JSON.stringify(archive.savedRaces) } : { value:stored['nar-saved-races'] };
+        if (archive?.schemaVersion===2 && !saved.value) throw new Error('保存レースが見つかりません。既存データを保護するため読込を中止しました');
         if (cancelled) return;
         if (saved && saved.value) {
           const items = JSON.parse(saved.value);
           if (Array.isArray(items) && items.length) {
             // Preserve historical objects byte-for-byte in meaning; no silent factor migration.
             const normalized = items;
-            if (!archive) migrationBackup.current = { createdAt:new Date().toISOString(), state:res?.value ? JSON.parse(res.value) : {}, savedRaces:clone(items) };
+            if (!archive) migrationBackup.current = { createdAt:new Date().toISOString(), originalState:res?.value ? JSON.parse(res.value) : {}, raceCount:items.length, archiveRetained:true };
+            // v11.0 embedded the archive; migrate that authoritative copy once.
+            archiveWritten.current = archive?.schemaVersion===1 ? null : normalized;
             setHistoryCount(normalized.filter((r:any)=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length);
             setSavedRaces(normalized);
           }
@@ -345,12 +353,12 @@ export default function NARPredictionTool() {
       committing.current = true;
       automaticSave.current = (async () => {
         try { await persist(live.current.savedRaces); }
-        catch (e) { setStorageReady(false); setStatus(`自動保存に失敗しました。全データを書き出して再読込してください: ${e instanceof Error ? e.message : '保存領域エラー'}`); }
+        catch (e) { setStatus(`自動保存に失敗しました。入力と既存レースは保持しています。「レースを保存」で再試行できます: ${e instanceof Error ? e.message : '保存領域エラー'}`); }
         finally { committing.current = false; automaticSave.current = null; }
       })();
     }, 400);
     return () => clearTimeout(t);
-  }, [loaded, storageReady, raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength, savedRaces]);
+  }, [loaded, storageReady, raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength, savedRaces, scanText]);
 
   const flash = (msg) => {
     setStatus(msg);
@@ -367,7 +375,7 @@ export default function NARPredictionTool() {
       state: {
         raceName, raceNo, track, surface, distance, going, raceClass, paceType,
         learningOn, learned, historyCount, learningHistory, horses, weights,
-        agariBonus, oddsOn, decayScale, oddsStrength
+        agariBonus, oddsOn, decayScale, oddsStrength, scanText
       },
       savedRaces,
     };
@@ -415,6 +423,7 @@ export default function NARPredictionTool() {
           if (st.historyCount !== undefined) setHistoryCount(st.historyCount);
           if (Array.isArray(st.learningHistory)) setLearningHistory(st.learningHistory);
           if (Array.isArray(st.horses)) setHorses(st.horses);
+          if (st.scanText) setScanText(prev=>({...prev,...st.scanText}));
           if (st.weights) setWeights(Number(st.weights.avg5) >= 40 ? st.weights : { best: 15, avg5: 50, dist: 15, course: 20 });
           if (st.agariBonus !== undefined) setAgariBonus(st.agariBonus);
           if (st.oddsOn !== undefined) setOddsOn(st.oddsOn);
@@ -3401,7 +3410,8 @@ export default function NARPredictionTool() {
 
   const saveRaceForLater = async () => {
     if (automaticSave.current) await automaticSave.current;
-    if (!storageReady || committing.current) { flash('保存準備中です。少し待って再試行してください'); return; }
+    if (!storageReady) { flash('保存データの読込に失敗しています。今の入力を「全データ保存」で保全してください'); return; }
+    if (committing.current) { flash('別の保存処理中です。完了後に再試行してください'); return; }
     if (!horses.length || !ranked.some(h => Number.isFinite(h._finalScore))) { flash('採点できる出走馬を入力してください'); return; }
     committing.current = true;
     try {

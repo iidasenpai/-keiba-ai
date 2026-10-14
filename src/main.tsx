@@ -12,6 +12,7 @@ declare global {
       get: (key: string) => Promise<StorageResult>;
       set: (key: string, value: string) => Promise<void>;
       setMany: (values: Record<string,string>, expectedRevision?: number) => Promise<void>;
+      getMany: (keys: string[]) => Promise<Record<string,string|null>>;
     };
     Tesseract?: any;
   }

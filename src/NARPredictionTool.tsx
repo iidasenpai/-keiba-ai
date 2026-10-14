@@ -1,4 +1,6 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { SNAPSHOT_KEY } from "./storage";
+import { clone, resultIssues, predictionView, sameField, orderedPrediction, chronological, makeLock, applyResult, mergeImport, abSummary } from "./raceIntegrity";
 
 // ---- 地方競馬 8枠カラー ----
 const WAKU_COLORS = {
@@ -242,11 +244,41 @@ export default function NARPredictionTool() {
   const [horseDbQuery, setHorseDbQuery] = useState("");
   const [horseDbSelected, setHorseDbSelected] = useState<string>("");
 
+  const migrationBackup = useRef<any>(null);
+  const committing = useRef(false);
+  const automaticSave = useRef<Promise<void>|null>(null);
+  const storageRevision = useRef(0);
+  const [storageReady, setStorageReady] = useState(false);
+  const live = useRef<any>({});
+  const currentState = { raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength };
+  live.current = { state: currentState, savedRaces };
+  const learningRaces = useMemo(() => savedRaces.filter(r => r.status === 'completed' && !resultIssues(r).length).map(predictionView), [savedRaces]);
+  const abVerification = useMemo(() => abSummary(savedRaces), [savedRaces]);
+  const persist = async (nextRaces: any[], statePatch: any = {}) => {
+    const state = { ...live.current.state, ...statePatch };
+    if (new Set(nextRaces.map(r => r.id)).size !== nextRaces.length) throw new Error('保存IDの重複を検出しました');
+    if (live.current.savedRaces.some((r: any) => !nextRaces.some(n => n.id === r.id))) throw new Error('既存レースを消す保存はできません');
+    const revision = storageRevision.current;
+    const snapshot = { schemaVersion: 1, revision: revision+1, updatedAt: new Date().toISOString(), state, savedRaces: nextRaces };
+    const values:any = { [SNAPSHOT_KEY]: JSON.stringify(snapshot), 'nar-tool-state': JSON.stringify(state), 'nar-saved-races': JSON.stringify(nextRaces) };
+    if (migrationBackup.current) values['nar-pre-v11-migration-backup'] = JSON.stringify(migrationBackup.current);
+    await window.storage.setMany(values, revision);
+    migrationBackup.current = null;
+    storageRevision.current = revision+1;
+    live.current = { state, savedRaces: nextRaces };
+  };
+
   // ---- 永続化 ----
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const res = await window.storage.get("nar-tool-state");
+        const canonical = await window.storage.get(SNAPSHOT_KEY);
+        if (cancelled) return;
+        const archive = canonical.value ? JSON.parse(canonical.value) : null;
+        if (archive && (archive.schemaVersion !== 1 || !Array.isArray(archive.savedRaces) || !archive.state)) throw new Error('一括保存データの形式が不正です');
+        storageRevision.current = Number(archive?.revision || 0);
+        const res = archive ? { value: JSON.stringify(archive.state) } : await window.storage.get("nar-tool-state");
         if (res && res.value) {
           const data = JSON.parse(res.value);
           if (data.raceName !== undefined) setRaceName(data.raceName);
@@ -268,21 +300,15 @@ export default function NARPredictionTool() {
           if (data.decayScale !== undefined) setDecayScale(data.decayScale);
           if (data.oddsStrength !== undefined) setOddsStrength(data.oddsStrength);
         }
-        const saved = await window.storage.get("nar-saved-races");
+        const saved = archive ? { value: JSON.stringify(archive.savedRaces) } : await window.storage.get("nar-saved-races");
+        if (cancelled) return;
         if (saved && saved.value) {
           const items = JSON.parse(saved.value);
           if (Array.isArray(items) && items.length) {
-            const normalized = items.map((race) => {
-              const fixed = normalizeLearningAppliedFlag(race);
-              return {
-                ...fixed,
-                horses: Array.isArray(fixed?.horses)
-                  ? fixed.horses.map((h) => autoCompleteHorseFactors(h, fixed))
-                  : [],
-              };
-            });
-            const processedCount = normalized.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
-            setHistoryCount((prev) => Math.max(prev, processedCount));
+            // Preserve historical objects byte-for-byte in meaning; no silent factor migration.
+            const normalized = items;
+            if (!archive) migrationBackup.current = { createdAt:new Date().toISOString(), state:res?.value ? JSON.parse(res.value) : {}, savedRaces:clone(items) };
+            setHistoryCount(normalized.filter((r:any)=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length);
             setSavedRaces(normalized);
           }
         } else {
@@ -294,56 +320,37 @@ export default function NARPredictionTool() {
             if (res.ok) {
               const backup = await res.json();
               if (backup?.type === "nar-ai-full-backup" && Array.isArray(backup.savedRaces) && backup.savedRaces.length) {
-                const normalized = backup.savedRaces.map((race) => {
-                  const fixed = normalizeLearningAppliedFlag(race);
-                  return {
-                    ...fixed,
-                    horses: Array.isArray(fixed?.horses)
-                      ? fixed.horses.map((h) => autoCompleteHorseFactors(h, fixed))
-                      : [],
-                  };
-                });
-                const processedCount = normalized.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
-                setHistoryCount((prev) => Math.max(prev, processedCount));
+                const normalized = backup.savedRaces;
                 setSavedRaces(normalized);
-                await window.storage.set("nar-saved-races", JSON.stringify(normalized));
+
               }
             }
           } catch (e) {
             // The app remains usable even if the bundled migration backup is unavailable.
           }
         }
+        setStorageReady(true);
       } catch (e) {
-        // no saved data yet
+        setStatus(`読込に失敗しました。既存データを保護するため保存を停止しています: ${e instanceof Error ? e.message : '保存領域エラー'}`);
       }
-      setLoaded(true);
+      if (!cancelled) setLoaded(true);
     })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
-    const t = setTimeout(async () => {
-      try {
-        await window.storage.set(
-          "nar-tool-state",
-          JSON.stringify({ raceName, raceNo, track, surface: "ダート", distance, going, raceClass: "", paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength })
-        );
-      } catch (e) {}
+    if (!loaded || !storageReady) return;
+    const t = setTimeout(() => {
+      if (committing.current) return;
+      committing.current = true;
+      automaticSave.current = (async () => {
+        try { await persist(live.current.savedRaces); }
+        catch (e) { setStorageReady(false); setStatus(`自動保存に失敗しました。全データを書き出して再読込してください: ${e instanceof Error ? e.message : '保存領域エラー'}`); }
+        finally { committing.current = false; automaticSave.current = null; }
+      })();
     }, 400);
     return () => clearTimeout(t);
-  }, [loaded, raceName, raceNo, track, distance, going, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    const t = setTimeout(async () => {
-      try {
-        await window.storage.set("nar-saved-races", JSON.stringify(savedRaces));
-      } catch (e) {
-        setStatus("保存に失敗しました。全データ保存でバックアップしてください");
-      }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [loaded, savedRaces]);
+  }, [loaded, storageReady, raceName, raceNo, track, surface, distance, going, raceClass, paceType, learningOn, learned, historyCount, learningHistory, horses, weights, agariBonus, oddsOn, decayScale, oddsStrength, savedRaces]);
 
   const flash = (msg) => {
     setStatus(msg);
@@ -388,7 +395,13 @@ export default function NARPredictionTool() {
           if (data?.type !== "nar-ai-full-backup" || !data?.state || !Array.isArray(data?.savedRaces)) {
             throw new Error("地方競馬AIの全データバックアップではありません");
           }
-          const st = data.state;
+          if (automaticSave.current) await automaticSave.current;
+          if (!storageReady || committing.current) throw new Error('保存処理中または保存領域が未準備です');
+          committing.current = true;
+          const merged = mergeImport(live.current.savedRaces, data.savedRaces);
+          const restoredCount = merged.filter((r:any)=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length;
+          const st = live.current.savedRaces.length ? { ...data.state, learned, historyCount:restoredCount, learningHistory } : { ...data.state, historyCount:restoredCount, learningHistory:[...(data.state.learningHistory||[]),{kind:'legacy-counter-import',at:new Date().toISOString(),reportedCount:data.state.historyCount,validatedProcessedCount:restoredCount}] };
+          await persist(merged, st);
           if (st.raceName !== undefined) setRaceName(st.raceName);
           if (st.raceNo !== undefined) setRaceNo(String(st.raceNo));
           if (st.track) setTrack(st.track);
@@ -407,20 +420,14 @@ export default function NARPredictionTool() {
           if (st.oddsOn !== undefined) setOddsOn(st.oddsOn);
           if (st.decayScale !== undefined) setDecayScale(st.decayScale);
           if (st.oddsStrength !== undefined) setOddsStrength(st.oddsStrength);
-          const normalizedImported = data.savedRaces.map((race:any) => {
-            const fixed = normalizeLearningAppliedFlag(race);
-            return { ...fixed, horses: Array.isArray(fixed?.horses) ? fixed.horses.map((h:any) => autoCompleteHorseFactors(h, fixed)) : [] };
-          });
-          const processedCount = normalizedImported.filter((r:any) => r.learnedApplied === true && r.status === "completed" && (r.horses || []).filter((h:any) => { const f=num(h.finish); return f!==null && f>=1 && f<=3; }).length === 3).length;
-          setHistoryCount((prev) => Math.max(prev, processedCount));
-          setSavedRaces(normalizedImported);
-          await window.storage.set("nar-tool-state", JSON.stringify({ ...st, historyCount: Math.max(Number(st.historyCount || 0), processedCount) }));
-          await window.storage.set("nar-saved-races", JSON.stringify(normalizedImported));
+          setSavedRaces(merged);
+          setActiveSavedRaceId(null);
+          setResultEntryMode(false);
           setSavedRacesOpen(true);
-          flash(`全データを復元しました（${normalizedImported.length}レース）`);
+          flash(`全データを復元しました（${merged.length}レース）`);
         } catch (e) {
           alert(`復元できませんでした: ${e instanceof Error ? e.message : "ファイル形式エラー"}`);
-        }
+        } finally { committing.current = false; }
       };
       reader.readAsText(file);
     };
@@ -431,9 +438,13 @@ export default function NARPredictionTool() {
   const addHorse = () => setHorses((h) => [...h, { ...emptyHorse(), umaban: h.length + 1 }]);
   const removeHorse = (id) => setHorses((h) => h.filter((x) => x.id !== id));
   const updateHorse = (id, field, value) =>
-    setHorses((h) => h.map((x) => (x.id === id ? { ...x, [field]: value } : x)));
+    setHorses((h) => h.map((x) => {
+      if (x.id !== id) return x;
+      const raw = Object.fromEntries(Object.entries(x).filter(([k])=>!k.startsWith('_') && k!=='predictedScore'));
+      return { ...raw, [field]:value, ...(field==='mark'?{manualMark:value}:{}) };
+    }));
   const updateTrainingGrade = (id, grade) =>
-    setHorses((h) => h.map((x) => x.id === id ? { ...x, training: grade, trainingScore: String(GRADE_TO_TRAINING_100[grade] ?? 70) } : x));
+    setHorses((h) => h.map((x) => x.id === id ? { ...Object.fromEntries(Object.entries(x).filter(([k])=>!k.startsWith('_') && k!=='predictedScore')), training: grade, trainingScore: String(GRADE_TO_TRAINING_100[grade] ?? 70) } : x));
 
   const autoCompleteCurrentHorses = () => {
     setHorses((prev) => prev.map((h) => autoCompleteHorseFactors(h, { track, surface, distance, raceClass })));
@@ -543,6 +554,7 @@ export default function NARPredictionTool() {
     }
     // 馬番の重複や桁崩れがないか軽くチェックして順に並べる
     parsed.sort((a, b) => Number(a.umaban || 0) - Number(b.umaban || 0));
+    setActiveSavedRaceId(null); setResultEntryMode(false);
     setHorses(parsed.map((h) => autoCompleteHorseFactors(h, { track, surface, distance, raceClass })));
     setBulkText("");
     setImportOpen(false);
@@ -1477,6 +1489,7 @@ export default function NARPredictionTool() {
     // 対応サイトの表は11行に分割し、馬番を1〜11で固定して読む。
     // 全画面OCRのゴミ文字を馬名として採用しない。
     const selected = Object.fromEntries(entries);
+    if (selected.race) { setActiveSavedRaceId(null); setResultEntryMode(false); setResultOrderInput(''); }
     let rowStep = 0;
     const rowTypes = ["race","standard","recent"].filter((t)=>selected[t]);
     const span = rowTypes.length ? 72 / rowTypes.length : 0;
@@ -1982,6 +1995,7 @@ export default function NARPredictionTool() {
     setAzureLastError("");
 
     // 出馬表を含む新規解析では前回レースの値を持ち越さず、列ずれ・残存値を防ぐ。
+    if (payloads.race) { setActiveSavedRaceId(null); setResultEntryMode(false); setResultOrderInput(''); }
     let next = payloads.race ? [] : horses.map((h)=>({ ...h }));
     if (payloads.race) next = mergeAzureRaceTable(payloads.race, next);
     if (payloads.standard) next = mergeAzureIndexTable(payloads.standard, next, false);
@@ -2106,6 +2120,7 @@ export default function NARPredictionTool() {
   const doImportJson = () => {
     try {
       const data = JSON.parse(exportText);
+      setActiveSavedRaceId(null); setResultEntryMode(false); setResultOrderInput('');
       if (data.horses) setHorses(data.horses);
       if (data.raceName !== undefined) setRaceName(data.raceName);
       if (data.raceNo !== undefined) setRaceNo(String(data.raceNo));
@@ -2116,9 +2131,9 @@ export default function NARPredictionTool() {
       setRaceClass("");
       if (data.paceType) setPaceType(data.paceType);
       if (data.learningOn !== undefined) setLearningOn(data.learningOn);
-      if (data.learned) setLearned((prev) => ({ ...prev, ...data.learned }));
-      if (data.historyCount !== undefined) setHistoryCount(data.historyCount);
-          if (Array.isArray(data.learningHistory)) setLearningHistory(data.learningHistory);
+      // Global learning state is restored only through a complete backup.
+
+
       if (data.weights) setWeights(Number(data.weights.avg5) >= 40 ? data.weights : { best: 15, avg5: 50, dist: 15, course: 20 });
       if (data.agariBonus !== undefined) setAgariBonus(data.agariBonus);
       if (data.oddsOn !== undefined) setOddsOn(data.oddsOn);
@@ -2167,7 +2182,7 @@ export default function NARPredictionTool() {
       st.upset += upset ? 1 : 0; st.favMiss += favMiss ? 1 : 0;
       map.set(key, st);
     };
-    savedRaces.filter((r)=>r.status === "completed" && (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;}).length === 3).forEach((r) => {
+    learningRaces.filter((r)=>r.status === "completed" && (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;}).length === 3).forEach((r) => {
       const actual = (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;});
       const top3 = new Set(actual.map((h)=>String(h.id || h.umaban)));
       const winner = actual.find((h)=>Number(h.finish) === 1);
@@ -2202,7 +2217,7 @@ export default function NARPredictionTool() {
       const st = bucket[style] || { n:0, top3:0 };
       st.n += 1; st.top3 += top3 ? 1 : 0; bucket[style] = st; map.set(key, bucket);
     };
-    savedRaces.filter((r)=>r.status === "completed" && (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;}).length === 3).forEach((r)=>{
+    learningRaces.filter((r)=>r.status === "completed" && (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;}).length === 3).forEach((r)=>{
       const actual = (r.horses||[]).filter((h)=>{const f=num(h.finish); return f!==null && f>=1 && f<=3;});
       const top3 = new Set(actual.map((h)=>String(h.id || h.umaban)));
       (r.horses || []).forEach((h)=>add(`${r.track}|${r.distance}`, h.runningStyle || "", top3.has(String(h.id || h.umaban))));
@@ -2215,7 +2230,7 @@ export default function NARPredictionTool() {
   // サンプルが少ない条件は全体学習を優先し、10Rで50%、20R以上で80%〜100%まで専用値を強める。
   const courseDistanceLearning = useMemo(() => {
     const byCondition = new Map();
-    const completed = savedRaces.filter((r:any) => r.status === "completed" && (r.horses || []).filter((h:any) => {
+    const completed = learningRaces.filter((r:any) => r.status === "completed" && (r.horses || []).filter((h:any) => {
       const f = num(h.finish); return f !== null && f >= 1 && f <= 3;
     }).length === 3);
 
@@ -2303,8 +2318,8 @@ export default function NARPredictionTool() {
       const st = map.get(key) || { n:0, sum:0 };
       st.n += 1; st.sum += residual; map.set(key, st);
     };
-    savedRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3).forEach((r:any) => {
-      const scored = [...(r.horses || [])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+    learningRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3).forEach((r:any) => {
+      const scored = orderedPrediction(r.horses || []);
       const rankMap = new Map(scored.map((h:any,i:number)=>[String(h.id || h.umaban), i+1]));
       (r.horses || []).forEach((h:any) => {
         const runs = Array.isArray(h.recentRuns) ? h.recentRuns.slice(0,5) : [];
@@ -2422,10 +2437,10 @@ export default function NARPredictionTool() {
 
   // ---- 会場×距離ごとのAI信頼度 ----
   const conditionReliability = useMemo(() => {
-    const rows=savedRaces.filter((r:any)=>r.status==="completed" && sameTrackDistance(r.track,r.distance,track,distance) && resultTop3Of(r).length===3);
+    const rows=learningRaces.filter((r:any)=>r.status==="completed" && sameTrackDistance(r.track,r.distance,track,distance) && resultTop3Of(r).length===3);
     let n=0, win=0, place=0, favWin=0, favN=0;
     rows.forEach((r:any)=>{
-      const ordered=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const ordered=orderedPrediction(r.horses || []);
       if(!ordered.length)return; n++; const f=num(ordered[0].finish); if(f===1)win++; if(f!==null&&f<=3)place++;
       const fav=(r.horses||[]).find((h:any)=>num(h.ninki)===1); if(fav){favN++; if(num(fav.finish)===1)favWin++;}
     });
@@ -2444,9 +2459,7 @@ export default function NARPredictionTool() {
     const consume = (r:any, st:any) => {
       const actual = resultTop3Of(r);
       if (actual.length < 3) return;
-      const pred = [...(r.horses || [])]
-        .filter((h:any)=>num(h.predictedScore)!==null)
-        .sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const pred = orderedPrediction(r.horses || []);
       if (pred.length < 2) return;
       const winner = actual.find((h:any)=>num(h.finish)===1);
       const ids = new Set(actual.map((h:any)=>String(h.id || h.umaban)));
@@ -2456,7 +2469,7 @@ export default function NARPredictionTool() {
       if (ids.has(String(pred[0].id||pred[0].umaban))) st.place1 += 1;
       if (ids.has(String(pred[1].id||pred[1].umaban))) st.place2 += 1;
     };
-    savedRaces.filter((r:any)=>r.status==='completed').forEach((r:any)=>{
+    learningRaces.filter((r:any)=>r.status==='completed').forEach((r:any)=>{
       consume(r, global);
       if (String(r.track||'')===String(track||'') && String(r.distance||'')===String(distance||'')) consume(r, exact);
     });
@@ -2522,11 +2535,9 @@ export default function NARPredictionTool() {
       st.n += 1; st.sum += residual; map.set(key, st);
     };
 
-    const completed = savedRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3);
+    const completed = learningRaces.filter((r:any)=>r.status === "completed" && resultTop3Of(r).length === 3);
     completed.forEach((r:any) => {
-      const ordered = [...(r.horses || [])]
-        .filter((h:any)=>num(h.predictedScore)!==null)
-        .sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const ordered = orderedPrediction(r.horses || []);
       const fallbackRank = new Map(ordered.map((h:any,i:number)=>[String(h.id || h.umaban), i+1]));
       (r.horses || []).forEach((h:any) => {
         let rr = num(h._rank);
@@ -2569,7 +2580,8 @@ export default function NARPredictionTool() {
     return { adjust, samples: observations.length };
   }, [savedRaces, track, distance]);
 
-  const computed = useMemo(() => {
+  const modelComputed = useMemo(() => {
+    const calculate = (modelWeights: any) => {
     const parsed = horses.map((h) => {
       const recentMeta = recentConditionMeta(h);
       const styleProfile = effectiveStyleOf(h);
@@ -2597,11 +2609,11 @@ export default function NARPredictionTool() {
       const distVal = h._dist !== null ? h._dist : h._best !== null ? h._best - 4 : null;
       const courseVal = h._course !== null ? h._course : h._best !== null ? h._best - 3 : null;
       const parts = [];
-      if (h._best !== null) parts.push([h._best, weights.best]);
-      if (recentIndex !== null) parts.push([recentIndex, weights.avg5]);
-      else if (h._avg5 !== null) parts.push([h._avg5, weights.avg5]);
-      if (distVal !== null) parts.push([distVal, weights.dist]);
-      if (courseVal !== null) parts.push([courseVal, weights.course]);
+      if (h._best !== null) parts.push([h._best, modelWeights.best]);
+      if (recentIndex !== null) parts.push([recentIndex, modelWeights.avg5]);
+      else if (h._avg5 !== null) parts.push([h._avg5, modelWeights.avg5]);
+      if (distVal !== null) parts.push([distVal, modelWeights.dist]);
+      if (courseVal !== null) parts.push([courseVal, modelWeights.course]);
       let base = null;
       if (parts.length) {
         const wt = parts.reduce((a,[,w])=>a+w,0) || 1;
@@ -2773,17 +2785,20 @@ export default function NARPredictionTool() {
         _trainingScore:training100, _commentScore:comment100, _commentAdj:commentAdj, _contextAdj:contextAdj, _finalScore:finalScore,
       };
     });
+    };
+    return { current: calculate(weights), A: calculate({ best:15, avg5:85, dist:0, course:0 }) };
   }, [horses, weights, distance, track, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning, conditionReliability]);
 
+  const computed = modelComputed.current;
   // ---- WIN / PLACE 分離モデル v10.1 ----
   // 保存済み結果の「予測順位→1着率/3着内率」を時系列実績から推定する。
   // 小標本の会場×距離は全体へ縮小し、人気は能力値そのものではなく勝ち切り判定の安全弁にだけ使う。
   const winPlaceCalibration = useMemo(() => {
     const mk=()=>Array.from({length:16},()=>({n:0,win:0,place:0}));
     const global=mk(), exact=mk();
-    const completed=savedRaces.filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3);
+    const completed=learningRaces.filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3);
     const consume=(r:any, arr:any[])=>{
-      const ordered=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>Number(b.predictedScore)-Number(a.predictedScore));
+      const ordered=orderedPrediction(r.horses || []);
       ordered.slice(0,15).forEach((h:any,i:number)=>{ const st=arr[i+1]; const f=num(h.finish); st.n++; if(f===1)st.win++; if(f!==null&&f<=3)st.place++; });
     };
     completed.forEach((r:any)=>{ consume(r,global); if(sameTrackDistance(r.track,r.distance,track,distance)) consume(r,exact); });
@@ -2798,7 +2813,8 @@ export default function NARPredictionTool() {
     return { rate, global, exact };
   },[savedRaces,track,distance]);
 
-  const ranked = useMemo(() => {
+  const modelRanked = useMemo(() => {
+    const calculate = (computed: any[]) => {
     // WIN（1着）とPLACE（3着内）を分離。印の◎○はWINを優先し、▲以下はPLACEも使う。
     const rawSorted = computed.filter((h) => h._finalScore !== null).slice().sort((a,b)=>b._finalScore-a._finalScore);
     const rawRank = new Map(rawSorted.map((h,i)=>[h.id,i+1]));
@@ -2844,10 +2860,15 @@ export default function NARPredictionTool() {
       const autoMark = idx !== undefined && idx < marks.length ? marks[idx] : "";
       return { ...h, _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
-  }, [computed, headRankCalibration, himoLearning, winPlaceCalibration]);
+    };
+    return { current: calculate(computed), A: calculate(modelComputed.A) };
+  }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration]);
+
+  const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
+  const ranked = activeLockedRace && sameField(activeLockedRace,{track,distance,raceNo,horses}) ? predictionView(activeLockedRace).horses : modelRanked.current;
 
   // ---- 新旧モデル並行検証（実験版 / 保存データは読み取り専用） ----
-  // 発走前に保存されたスコアを基準にし、人気・近走情報の補正を比較する。
+  // 現存保存値による近似比較。事前固定A/B比較とは別集計。
   // 過去の結果を特徴量へ入れず、欠損項目は補正ゼロ。過去データを再学習・上書きしない。
   const shadowComparison = useMemo(() => {
     const safe = (v:any) => { const n=Number(v); return v===null||v===undefined||v===''||!Number.isFinite(n)?null:n; };
@@ -2871,7 +2892,7 @@ export default function NARPredictionTool() {
       return {base:isWin(original),candidate:isWin(experimental),changed:String(original.umaban)!==String(experimental.umaban)};
     };
     const stats={races:0,baseWins:0,candidateWins:0,changed:0,missing:0};
-    savedRaces.filter((r:any)=>r.status==='completed').forEach((r:any)=>{
+    learningRaces.filter((r:any)=>r.status==='completed').forEach((r:any)=>{
       const e=evaluate(r);
       if(!e){stats.missing++;return;}
       stats.races++;if(e.base)stats.baseWins++;if(e.candidate)stats.candidateWins++;if(e.changed)stats.changed++;
@@ -3185,7 +3206,8 @@ export default function NARPredictionTool() {
     const nums = String(raw || "").match(/\d{1,2}/g)?.map(Number) || [];
     if (nums.length !== 3) return { ok: false as const, message: "1着-2着-3着の馬番を3頭入力してください（例: 3-11-5）", order: [] as number[] };
     if (new Set(nums).size !== 3) return { ok: false as const, message: "同じ馬番は重複して入力できません", order: nums };
-    const valid = new Set(ranked.map((h:any)=>Number(h.umaban)).filter(Number.isFinite));
+    const resultField = savedRaces.find((r:any)=>r.id===activeSavedRaceId)?.horses || ranked;
+    const valid = new Set(resultField.map((h:any)=>Number(h.umaban)).filter(Number.isFinite));
     const invalid = nums.filter(n=>!valid.has(n));
     if (invalid.length) return { ok: false as const, message: `存在しない馬番があります: ${invalid.join(", ")}`, order: nums };
     return { ok: true as const, message: "", order: nums };
@@ -3220,7 +3242,7 @@ export default function NARPredictionTool() {
   };
 
   const learnFromRace = (raceHorses:any[], pace:string, base:any) => {
-    const top3 = raceHorses.filter((h:any)=>{ const f=num(h.finish); return f!==null && f<=3; });
+    const top3 = raceHorses.filter((h:any)=>{ const f=num(h.finish); return f!==null && f>=1 && f<=3; });
     const topIds = new Set(top3.map((h:any)=>String(h.id || h.umaban)));
     const others = raceHorses.filter((h:any)=>!topIds.has(String(h.id || h.umaban)));
     if (top3.length < 3 || !others.length) return { next: base, changes: {} as Record<string,number> };
@@ -3241,7 +3263,7 @@ export default function NARPredictionTool() {
   };
 
   const learningSummary = useMemo(() => {
-    const completed = savedRaces.filter((r)=>r.status === "completed");
+    const completed = learningRaces.filter((r)=>r.status === "completed");
     let topWin=0, topPlace=0, markedTop3=0, totalTop3=0, total=0;
     completed.forEach((r)=>{
       const all=(r.horses||[]);
@@ -3249,7 +3271,7 @@ export default function NARPredictionTool() {
       if(actual.length<3) return;
       total += 1;
       totalTop3 += 3;
-      const pred=[...all].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const pred=orderedPrediction(all);
       const top=pred[0];
       const winner=actual.find((h:any)=>num(h.finish)===1);
       const actualIds=new Set(actual.map((h:any)=>String(h.id||h.umaban)));
@@ -3296,7 +3318,7 @@ export default function NARPredictionTool() {
     const all=(race?.horses||[]);
     const actual=resultTop3Of(race);
     if(actual.length<3) return null;
-    const pred=[...all].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+    const pred=orderedPrediction(all);
     const top=pred[0], top3=actual;
     const missed=top3.filter((h:any)=>!["◎","○","▲","△","☆"].includes(h.mark||""));
     const actualIds=new Set(top3.map((h:any)=>String(h.id||h.umaban)));
@@ -3319,11 +3341,11 @@ export default function NARPredictionTool() {
 
   const conditionStats = useMemo(()=>{
     const map=new Map<string,any>();
-    savedRaces.filter(r=>r.status==='completed').forEach(r=>{
+    learningRaces.filter(r=>r.status==='completed').forEach(r=>{
       const key=`${r.track} ${r.distance||''}m`;
       const actual=resultTop3Of(r);
       if(actual.length<3)return;
-      const pred=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const pred=orderedPrediction(r.horses || []);
       const st=map.get(key)||{key,races:0,wins:0,places:0}; st.races++;
       const winner=actual.find((h:any)=>num(h.finish)===1);
       const actualIds=new Set(actual.map((h:any)=>String(h.id||h.umaban)));
@@ -3335,12 +3357,12 @@ export default function NARPredictionTool() {
   },[savedRaces]);
 
   const backtest = useMemo(()=>{
-    const completed=savedRaces.filter(r=>r.status==='completed');
+    const completed=learningRaces.filter(r=>r.status==='completed');
     let races=0, win=0, place=0, top3Capture=0;
     completed.forEach(r=>{
       const actual=resultTop3Of(r);
       if(actual.length<3)return;
-      const pred=[...(r.horses||[])].filter((h:any)=>num(h.predictedScore)!==null).sort((a:any,b:any)=>num(b.predictedScore)-num(a.predictedScore));
+      const pred=orderedPrediction(r.horses || []);
       if(!pred.length)return; races++;
       const winner=actual.find((h:any)=>num(h.finish)===1);
       const actualIds=new Set(actual.map((h:any)=>String(h.id||h.umaban)));
@@ -3371,32 +3393,35 @@ export default function NARPredictionTool() {
     oddsStrength,
     confidenceSnapshot: confidence,
     dataQualitySnapshot: dataQuality,
-    horses: ranked.map((h) => ({ ...sanitizeHorseRecord(h), mark: h.mark || h._autoMark || "", predictedScore: h._finalScore })),
+    horses: ranked.map((h) => ({ ...h, mark: h.mark || h._autoMark || "", predictedScore: h._finalScore })),
     status: previous.status || "pending",
     savedAt: previous.savedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
 
   const saveRaceForLater = async () => {
-    if (!horses.length) { flash("先に出走馬を解析してください"); return; }
-    const usable = horses.filter((h) => h.name || h.umaban);
-    if (!usable.length) { flash("保存できるレース情報がありません"); return; }
-    const existing = savedRaces.find((r) => r.id === activeSavedRaceId);
-    const id = existing?.id || crypto.randomUUID();
-    const snapshot = currentRaceSnapshot(id, existing || {});
-    snapshot.status = existing?.status === "completed" ? "completed" : "pending";
-    const nextSavedRaces = [snapshot, ...savedRaces.filter((r) => r.id !== id)];
+    if (automaticSave.current) await automaticSave.current;
+    if (!storageReady || committing.current) { flash('保存準備中です。少し待って再試行してください'); return; }
+    if (!horses.length || !ranked.some(h => Number.isFinite(h._finalScore))) { flash('採点できる出走馬を入力してください'); return; }
+    committing.current = true;
     try {
-      // 画面更新を待たず、保存ボタンを押した瞬間に永続化する。
-      // iPhoneでページを閉じたり再読み込みしても「保存したのに消えた」を防ぐ。
-      await window.storage.set("nar-saved-races", JSON.stringify(nextSavedRaces));
-      setSavedRaces(nextSavedRaces);
-      setActiveSavedRaceId(id);
-      setResultEntryMode(false);
-      flash(existing ? "保存済みレースを更新しました" : "解析結果を保存しました");
-    } catch (e) {
-      flash("保存に失敗しました。全データ保存でバックアップしてください");
-    }
+      const existing = live.current.savedRaces.find((r:any)=>r.id===activeSavedRaceId);
+      if (existing?.status === 'completed' || existing?.predictionLock) throw new Error('固定済み予測は更新できません。結果は「結果入力」から保存してください。再予測は新規保存になります');
+      const id = existing?.id || crypto.randomUUID();
+      const snapshot = currentRaceSnapshot(id, existing || {});
+      if (existing && !sameField(existing,snapshot)) throw new Error('別の出走馬です。新しい出馬表として取り込んで保存してください');
+      // Keep the scored inputs unchanged. Sanitization belongs before scoring, never after it.
+      snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
+      if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned, learningCount: learningRaces.length, inputVersion:'v11.0' }, snapshot.updatedAt);
+      snapshot.predictedAt = snapshot.predictionLock.lockedAt;
+      snapshot.status = 'pending';
+      const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
+      await persist(next);
+      setSavedRaces(next); setActiveSavedRaceId(id); setResultEntryMode(false);
+      flash('事前予測を固定して保存しました');
+    } catch(e) { flash(e instanceof Error ? e.message : '保存に失敗しました'); }
+    finally { committing.current = false; }
   };
 
   const loadSavedRace = (race: any, forResult = false) => {
@@ -3414,7 +3439,7 @@ export default function NARPredictionTool() {
     if (race.oddsOn !== undefined) setOddsOn(race.oddsOn);
     if (race.decayScale !== undefined) setDecayScale(race.decayScale);
     if (race.oddsStrength !== undefined) setOddsStrength(race.oddsStrength);
-    setHorses((race.horses || []).map((h) => ({ ...sanitizeHorseRecord(h), finish: h.finish || "" })));
+    setHorses(clone(race.horses || []));
     setActiveSavedRaceId(race.id);
     setResultEntryMode(forResult);
     if (forResult) {
@@ -3434,102 +3459,80 @@ export default function NARPredictionTool() {
     flash(forResult ? "保存済みレースを読み込みました。1着-2着-3着の馬番を入力してください" : "保存済みレースを読み込みました");
   };
 
-  const deleteSavedRace = async (id: string) => {
-    if (!confirm("この保存済みレースを削除しますか？")) return;
-    const nextSavedRaces = savedRaces.filter((r) => r.id !== id);
-    try {
-      await window.storage.set("nar-saved-races", JSON.stringify(nextSavedRaces));
-      setSavedRaces(nextSavedRaces);
-      if (activeSavedRaceId === id) {
-        setActiveSavedRaceId(null);
-        setResultEntryMode(false);
-      }
-      flash("保存済みレースを削除しました");
-    } catch (e) {
-      flash("削除の保存に失敗しました");
-    }
+  const deleteSavedRace = async (_id: string) => {
+    flash('既存レースの保護を有効にしています。レースは削除されません');
+  };
+
+  const replayLearning = (records: any[]) => {
+    const eligible = chronological(records.filter(r=>r.status==='completed' && !resultIssues(r).length).map(predictionView));
+    let next:any = { ...DEFAULT_LEARNED };
+    const history:any[] = [], details = new Map<string,any>();
+    eligible.forEach((r:any) => {
+      const res = learnFromRace(r.horses || [], r.paceType || 'M', next);
+      next = res.next;
+      details.set(r.id, res.changes);
+      history.push({ raceId:r.id, title:r.title, processedAt:new Date().toISOString(), resultAt:r.firstCompletedAt||r.completedAt, changes:res.changes, noChange:!Object.keys(res.changes).length, replayed:true, version:'v11.0', predictionSource:r.predictionLock?'prospective-lock':'legacy-approximation' });
+    });
+    return { learned:next, history, count:eligible.length, details };
   };
 
   const saveResultAndLearn = async () => {
-    const raceId = activeSavedRaceId;
-    if (!raceId) { flash("先に保存済みレースから対象レースを開いてください"); return; }
-    const parsed=parseResultOrder(resultOrderInput);
-    if(!parsed.ok){ flash(parsed.message); return; }
-    const order=parsed.order;
-    const finishByUmaban=new Map(order.map((u,i)=>[String(u),String(i+1)]));
-    const raceHorses=ranked.map((h:any)=>({ ...h, finish: finishByUmaban.get(String(h.umaban)) || "" }));
-    const activeRecord = savedRaces.find((r) => r.id === raceId);
-    const shouldLearn = !activeRecord?.learnedApplied;
-    const validResultForLearning = resultTop3Of({ horses: raceHorses }).length === 3;
-    const learningProcessed = !!(shouldLearn && learningOn && validResultForLearning);
-    let canLearn=false;
-    let changes:Record<string,number>={};
-    if(learningProcessed){
-      // v10.1: 1レースごとにグローバル重みを揺らさない。20Rごとの境界だけ再推定する。
-      const completedBefore=savedRaces.filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3).length;
-      const batchBoundary=((completedBefore+1)%20)===0;
-      if(batchBoundary){
-        const chronological=[...savedRaces].filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3).reverse();
-        chronological.push({horses:raceHorses,paceType});
-        let batchNext:any={...DEFAULT_LEARNED};
-        chronological.forEach((r:any)=>{ const res=learnFromRace(r.horses||[],r.paceType||'M',batchNext); batchNext=res.next; });
-        Object.keys(DEFAULT_LEARNED).forEach((k)=>{ const d=Number(batchNext[k]??1)-Number(learned[k]??1); if(Math.abs(d)>=0.0001) changes[k]=Number(d.toFixed(4)); });
-        canLearn=Object.keys(changes).length>0;
-        if(canLearn) setLearned(batchNext);
-      }
-      // 結果比較は毎R記録するが、重み更新は20Rごと。
-      setHistoryCount((n)=>n+1);
-      setLearningHistory((prev)=>[{
-        raceId,
-        title: `${track}${raceNo}R ${distance}m`,
-        at:new Date().toISOString(),
-        changes,
-        noChange: !canLearn,
-      },...prev].slice(0,100));
-    }
-    const updated = currentRaceSnapshot(raceId, activeRecord || {});
-    updated.status = "completed";
-    updated.completedAt = new Date().toISOString();
-    updated.learnedApplied = activeRecord?.learnedApplied || learningProcessed;
-    updated.learningNoChange = learningProcessed && !canLearn;
-    updated.resultOrder = order.join("-");
-    updated.learningChanges = changes;
-    updated.horses = raceHorses.map((h:any) => ({ ...sanitizeHorseRecord(h), mark: h.mark || h._autoMark || "", predictedScore: h._finalScore, finish: h.finish || "" }));
-    updated.review = buildReview(updated);
-    const nextSavedRaces = [updated, ...savedRaces.filter((r) => r.id !== raceId)];
+    if (automaticSave.current) await automaticSave.current;
+    if (!storageReady || committing.current) { flash('保存処理中です。少し待ってください'); return; }
+    const active = live.current.savedRaces.find((r:any)=>r.id===activeSavedRaceId);
+    if (!active) { flash('対象レースを保存履歴から読み込んでください'); return; }
+    if (active.status==='completed' && resultIssues(active).length) { flash('結果と出走馬が不整合のため自動修正できません。元データは保持されています'); return; }
+    const parsed = parseResultOrder(resultOrderInput);
+    if (!parsed.ok) { flash(parsed.message); return; }
+    committing.current = true;
     try {
-      // 結果入力もボタン押下時に即保存。学習結果も同時に保存する。
-      await window.storage.set("nar-saved-races", JSON.stringify(nextSavedRaces));
-      setHorses(raceHorses.map((h:any)=>sanitizeHorseRecord(h)));
-      setSavedRaces(nextSavedRaces);
-      setResultEntryMode(false);
-      setSavedRacesOpen(true);
-      flash(learningProcessed ? (canLearn ? `結果${order.join("-")}を保存し、20Rバッチで${Object.keys(changes).length}項目を更新しました` : `結果${order.join("-")}を保存しました（重みは20R単位で更新）`) : `結果${order.join("-")}を保存しました`);
-    } catch (e) {
-      flash("結果の保存に失敗しました。全データ保存でバックアップしてください");
-    }
+      const now = new Date().toISOString();
+      const updated = applyResult(active,{track,distance,raceNo,horses},parsed.order.map(String),now);
+      updated.review = buildReview(updated);
+      if (resultIssues(updated).length) throw new Error(resultIssues(updated).join(' / '));
+      const correction = active.status==='completed' && active.resultOrder!==updated.resultOrder;
+      const newProcess = !active.learnedApplied && learningOn;
+      updated.learnedApplied = active.learnedApplied || newProcess;
+      updated.learningChanges = clone(active.learningChanges || {});
+      let next = [updated,...live.current.savedRaces.filter((r:any)=>r.id!==active.id)];
+      let statePatch:any = { horses:updated.horses };
+      const processed = next.filter(r=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length;
+      const batchBoundary = newProcess && processed % 20 === 0;
+      if ((correction && active.learnedApplied) || batchBoundary) {
+        const replay = replayLearning(next);
+        // Result corrections replace old contributions by replaying, rather than learning twice.
+        next = next.map((r:any) => replay.details.has(r.id) ? { ...r, learnedApplied:true, learningAudit:[...(r.learningAudit||[]),{at:now, previousChanges:clone(r.learningChanges||{}),reason:correction?'result-correction':'20-race-batch'}], learningChanges:replay.details.get(r.id), learningNoChange:!Object.keys(replay.details.get(r.id)).length } : r);
+        statePatch = { ...statePatch, learned:replay.learned, historyCount:replay.count, learningHistory:[...learningHistory,{raceId:active.id,at:now,kind:correction?'result-correction-replay':'batch-replay',records:replay.history}] };
+      } else if (newProcess) {
+        statePatch = { ...statePatch, historyCount:processed, learningHistory:[...learningHistory,{raceId:active.id,title:active.title,at:now,changes:{},noChange:true,version:'v11.0',predictionSource:active.predictionLock?'prospective-lock':'legacy-approximation'}] };
+        updated.learningNoChange = true;
+      }
+      await persist(next,statePatch);
+      setSavedRaces(next); setHorses(updated.horses);
+      if (statePatch.learned) setLearned(statePatch.learned);
+      if (statePatch.historyCount!==undefined) setHistoryCount(statePatch.historyCount);
+      if (statePatch.learningHistory) setLearningHistory(statePatch.learningHistory);
+      setResultEntryMode(false); setSavedRacesOpen(true);
+      flash(correction?'結果修正を保存しました。固定予測と旧結果の履歴は保持されています':'結果を保存しました。予測は変更されていません');
+    } catch(e) { flash(e instanceof Error ? e.message : '保存に失敗しました。学習状態は変更していません'); }
+    finally { committing.current = false; }
   };
 
-  const relearnAllCompleted = () => {
-    const races=[...savedRaces].filter((r:any)=>r.status==='completed' && resultTop3Of(r).length===3).reverse();
-    if(!races.length){ flash("再学習できる結果済みレースがありません"); return; }
-    let next:any={...DEFAULT_LEARNED};
-    const history:any[]=[];
-    let changedRaces=0;
-    const updatedIds=new Set<string>(races.map((r:any)=>String(r.id)));
-    const noChangeById=new Map<string,boolean>();
-    races.forEach((r:any)=>{
-      const res=learnFromRace(r.horses||[], r.paceType||"M", next);
-      const changed=Object.keys(res.changes).length>0;
-      noChangeById.set(String(r.id), !changed);
-      if(changed){ next=res.next; changedRaces++; }
-      history.unshift({raceId:r.id,title:`${r.track || ""}${String(r.raceNo || r.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1"}R ${r.distance || ""}m`.trim(),at:new Date().toISOString(),changes:res.changes,relearned:true,noChange:!changed});
-    });
-    setLearned(next);
-    setHistoryCount(races.length);
-    setLearningHistory(history.slice(0,100));
-    setSavedRaces((prev)=>prev.map((r:any)=>updatedIds.has(String(r.id))?{...r,learnedApplied:true,learningNoChange:noChangeById.get(String(r.id))===true}:r));
-    flash(`${races.length}レースを再確認し、${changedRaces}レースで学習値を更新しました`);
+  const relearnAllCompleted = async () => {
+    if (automaticSave.current) await automaticSave.current;
+    if (!storageReady || committing.current) { flash('保存処理中です'); return; }
+    committing.current = true;
+    try {
+      const replay = replayLearning(live.current.savedRaces);
+      if (!replay.count) throw new Error('整合する結果確定レースがありません');
+      const now = new Date().toISOString();
+      const next = live.current.savedRaces.map((r:any)=> replay.details.has(r.id) ? { ...r,learnedApplied:true,learningAudit:[...(r.learningAudit||[]),{at:now,previousChanges:clone(r.learningChanges||{}),reason:'manual-replay'}],learningChanges:replay.details.get(r.id),learningNoChange:!Object.keys(replay.details.get(r.id)).length } : r);
+      const history = [...learningHistory,{at:now,kind:'full-replay',records:replay.history}];
+      await persist(next,{learned:replay.learned,historyCount:replay.count,learningHistory:history});
+      setSavedRaces(next); setLearned(replay.learned); setHistoryCount(replay.count); setLearningHistory(history);
+      flash(`${replay.count}件を時系列で再学習しました。不整合データは保持して対象外にしています`);
+    } catch(e) { flash(e instanceof Error ? e.message : '保存に失敗しました'); }
+    finally { committing.current = false; }
   };
 
   const setW = (key, val) => setWeights((w) => ({ ...w, [key]: Number(val) }));
@@ -3541,6 +3544,7 @@ export default function NARPredictionTool() {
   const activeScan = visibleScanTypes.find(([type])=>type===scanActiveType) || visibleScanTypes[0];
 
   const applyScanTexts = (jumpToResults = false) => {
+    if (scanText.race) { setActiveSavedRaceId(null); setResultEntryMode(false); setResultOrderInput(''); }
     let next=scanText.race ? [] : horses.map(h=>({...h}));
     // 先に馬の母体を作る。詳細(form)を先に解析すると、馬がまだ存在せず脚質が全件未取得になるため順序を固定。
     if(scanText.race) next=parseRaceText(scanText.race,next);
@@ -3656,9 +3660,10 @@ export default function NARPredictionTool() {
 
       <div className="mx-3 mt-3 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm">
         <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-          {!resultEntryMode ? (
+          {!resultEntryMode ? (<>
+            <button onClick={() => { setActiveSavedRaceId(null); setResultEntryMode(false); setResultOrderInput(''); setHorses(prev=>prev.map(h=>({ ...Object.fromEntries(Object.entries(h).filter(([k])=>!k.startsWith('_') && k!=='predictedScore')),finish:'',mark:h.manualMark||'' }))); flash('別の予測として保存できます。以前のレースは保持されています'); }} className="rounded-xl bg-slate-100 px-4 py-3 text-sm font-black text-slate-700">新規レース・再予測</button>
             <button onClick={saveRaceForLater} className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-black text-white shadow-sm">レースを保存</button>
-          ) : (
+          </>) : (
             <button onClick={saveResultAndLearn} className="rounded-xl bg-purple-700 px-4 py-3 text-sm font-black text-white shadow-sm">結果保存・学習</button>
           )}
           <button onClick={() => setSavedRacesOpen((v) => !v)} className="rounded-xl bg-slate-800 px-4 py-3 text-sm font-black text-white shadow-sm">保存済み {savedRaces.length ? `(${savedRaces.length})` : ""}</button>
@@ -3989,9 +3994,10 @@ export default function NARPredictionTool() {
       </div>
 
       <div className="mx-3 mt-3 rounded-xl border border-violet-200 bg-white p-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-black text-violet-900">🧠 自動学習</div><div className="text-[10px] text-gray-500">結果保存時に好走馬と凡走馬を比較。差が小さく重みが動かないレースも処理済みとして記録</div></div><div className="text-sm font-black text-violet-700">{historyCount}レース処理済み</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="font-black text-violet-900">🧠 自動学習（旧履歴は近似・新規は予測固定）</div><div className="text-[10px] text-gray-500">結果保存時に好走馬と凡走馬を比較。差が小さく重みが動かないレースも処理済みとして記録</div></div><div className="text-sm font-black text-violet-700">{historyCount}レース処理済み</div></div>
         <div className="mt-2 grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">◎勝率</div><div className="font-black">{learningSummary.total ? Math.round(learningSummary.topWin/learningSummary.total*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.topWin}/{learningSummary.total})</span></div></div><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">◎複勝率</div><div className="font-black">{learningSummary.total ? Math.round(learningSummary.topPlace/learningSummary.total*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.topPlace}/{learningSummary.total})</span></div></div><div className="rounded bg-violet-50 p-2"><div className="text-gray-500">印の3着内捕捉率</div><div className="font-black">{learningSummary.totalTop3 ? Math.round(learningSummary.markedTop3/learningSummary.totalTop3*100) : 0}% <span className="text-[9px] text-gray-400">({learningSummary.markedTop3}/{learningSummary.totalTop3})</span></div></div></div>
-        <div className="mt-2 flex flex-wrap items-center gap-2"><button onClick={relearnAllCompleted} className="rounded bg-violet-700 px-3 py-1.5 text-[10px] font-black text-white">既存結果から全再学習</button><span className="text-[10px] text-gray-500">1〜3着で再計算し、旧版の未学習フラグもまとめて修復します。</span></div>
+        <div className="mt-2 text-xs text-slate-600">事前固定A/B比較：{abVerification.count}件　A 4頭全捕捉 {abVerification.a}件 / B {abVerification.b}件（過去の近似検証は含みません）。結果整合性の確認が必要：{savedRaces.filter(r=>r.status==='completed' && resultIssues(r).length).length}件</div>
+        <div className="mt-2 flex flex-wrap items-center gap-2"><button onClick={relearnAllCompleted} className="rounded bg-violet-700 px-3 py-1.5 text-[10px] font-black text-white">既存結果から全再学習</button><span className="text-[10px] text-gray-500">1〜3着で再計算し、不整合を除き、固定予測または過去保存値から再計算します。</span></div>
         {learningHistory.length>0 && <div className="mt-2 rounded bg-violet-50 p-2 text-[10px] text-violet-900"><div className="font-black">直近の学習変更</div><div className="mt-1">{Object.entries(learningHistory[0].changes||{}).map(([k,v]:any)=>`${k} ${v>0?"+":""}${Number(v).toFixed(3)}`).join(" / ") || "変更なし"}</div></div>}
         <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-gray-600">{Object.entries(learned).map(([k,v])=><span key={k} className="rounded bg-gray-100 px-2 py-1">{k}: {Number(v).toFixed(2)}</span>)}</div>
         <div className="mt-2 rounded border border-indigo-200 bg-indigo-50 p-2 text-[10px] text-indigo-950">
@@ -4114,13 +4120,13 @@ export default function NARPredictionTool() {
                       <div className="mt-0.5 text-[10px] text-slate-500">{race.track}・{race.distance || ""}m・{race.going}／{race.horses?.length || 0}頭</div>
                       <div className="mt-1 text-[10px] text-slate-400">保存: {race.savedAt ? new Date(race.savedAt).toLocaleString("ja-JP") : "-"}</div>
                     </div>
-                    <span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${race.status === "completed" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{race.status === "completed" ? "結果入力済み" : "結果待ち"}</span>
+                    <span className={`shrink-0 rounded px-2 py-1 text-[10px] font-bold ${race.status === "completed" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{race.status === "completed" ? "結果入力済み" : "結果待ち"}・{race.predictionLock ? '予測固定' : '旧保存'}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <button onClick={() => loadSavedRace(race, false)} className="rounded bg-slate-100 px-3 py-1.5 text-[11px] font-bold text-slate-700">予想を見る</button>
                     <button onClick={() => loadSavedRace(race, true)} className="rounded bg-purple-700 px-3 py-1.5 text-[11px] font-bold text-white">{race.status === "completed" ? "結果を修正" : "結果を入力"}</button>
                     {race.status === "completed" && <button onClick={()=>setReviewRaceId(reviewRaceId===race.id?null:race.id)} className="rounded bg-indigo-700 px-3 py-1.5 text-[11px] font-bold text-white">AI回顧</button>}
-                    <button onClick={() => deleteSavedRace(race.id)} className="rounded border border-red-200 px-3 py-1.5 text-[11px] font-bold text-red-500">削除</button>
+                    <button onClick={() => deleteSavedRace(race.id)} className="rounded border border-red-200 px-3 py-1.5 text-[11px] font-bold text-red-500">保護中</button>
                   </div>
                   {reviewRaceId===race.id && (()=>{const rv=race.review||buildReview(race); return rv?<div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50 p-3"><div className="font-black text-indigo-900">AI回顧 評価 {rv.grade}</div><div className="mt-1 text-xs">実着順: {rv.actual.map((h:any)=>`${h.finish}着 ${h.umaban} ${h.name}`).join(" / ")}</div><div className="mt-2 space-y-1 text-[11px] text-indigo-900">{rv.notes.map((n:string,i:number)=><div key={i}>・{n}</div>)}</div></div>:<div className="mt-2 text-xs text-gray-400">回顧に必要な着順が不足しています</div>})()}
                 </div>

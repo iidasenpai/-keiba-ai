@@ -1,6 +1,6 @@
 // v12: pure scoring, evidence and archive helpers. Historical records are never migrated in place.
-export const MODEL_VERSION = 'nar-safe-v12.0';
-export const MODEL_BUILD = 'v12-sha256-10f73811885a7845535880c0226453b57d48b362df3d40a343e50e006ddf6c92';
+export const MODEL_VERSION = 'nar-safe-v12.1';
+export const MODEL_BUILD = 'v12.1-sha256-10de2a3547c6879cb7a187d3cd9a71e1049b64ac4af01a891456665852982954';
 export const ACTIVE_FACTORS = ['training','comment','pace','jockey','body','ground','classFit','gate','pedigree','condition'];
 export const finite = (v:any):number|null => {
   if (v == null || String(v).trim()==='' || /^[-—–未]+$/.test(String(v).trim())) return null;

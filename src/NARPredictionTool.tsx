@@ -3,6 +3,8 @@ import { SNAPSHOT_KEY } from "./storage";
 import { finite, validWeights, observed, cleanInputs, fieldAudit, estimatePace, paceExpected, scoreParts, fieldProbabilities, scoreComment, MODEL_VERSION, MODEL_BUILD, ACTIVE_FACTORS, eligibleHistory, eventKey, raceInstant, outcomeStats, verifiedBeforeStart, latestLearning, encodeArchive, decodeArchive, nonStarter } from './modelSafety';
 import AuditPanel from './AuditPanel';
 import BatchImportPanel from './BatchImportPanel';
+import ResultImportPanel from './ResultImportPanel';
+import {planResultImport} from './resultImport';
 import {indexFields,prepareBatch} from './sourceImport';
 import { clone, resultIssues, predictionView, sameField, orderedPrediction, chronological, makeLock, applyResult, mergeImport, abSummary } from "./raceIntegrity";
 
@@ -24,7 +26,7 @@ const wakuOf = (umaban) => {
 };
 
 const NAR_TRACKS = ["帯広", "門別", "盛岡", "水沢", "浦和", "船橋", "大井", "川崎", "金沢", "笠松", "名古屋", "園田", "姫路", "高知", "佐賀"];
-const GOINGS = ["良", "稍重", "重", "不良"];
+const GOINGS = ["未確認", "良", "稍重", "重", "不良"];
 const RUNNING_STYLES = ["", "逃", "先", "差", "追", "自在"];
 const JRA_TRACKS = ["札幌","函館","福島","新潟","東京","中山","中京","京都","阪神","小倉"];
 const COMMENT_TRAINING_TRACKS = ["浦和","船橋","大井","川崎","門別"];
@@ -3313,7 +3315,7 @@ export default function NARPredictionTool() {
       // Keep the scored inputs unchanged. Sanitization belongs before scoring, never after it.
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.2', raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.3', raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3484,13 +3486,44 @@ export default function NARPredictionTool() {
     next=next.map(h=>({...h,inputSources:Object.values(sources).map((p:any)=>({kind:p.kind,url:p.url,capturedAt:p.capturedAt})),finish:'',actualFinish:null}));
     setActiveSavedRaceId(null);setResultEntryMode(false);setResultOrderInput('');setRevisionOf(null);
     setRaceDate(meta.raceDate);setStartTime(meta.startTime||'');setTrack(meta.track);setDistance(meta.distance);setSurface('ダート');setRaceNo(meta.raceNo);setRaceName(meta.raceName||'');setRaceClass('');
-    const goingMap={'稍':'稍重','不':'不良'};setGoing(goingMap[meta.going]||(['良','稍重','重','不良'].includes(meta.going)?meta.going:'良'));
+    const goingMap={'稍':'稍重','不':'不良'};setGoing(goingMap[meta.going]||(['良','稍重','重','不良'].includes(meta.going)?meta.going:'未確認'));
     setSourceName(sources.training||sources.comment?'netkeiba / 競馬ブック':'netkeiba');setSourceRaceId(draft.sourceRaceId);
     const providerPace=sources.race.paceText?.match(/ペース\s*([SMH])/);setPaceType(providerPace?.[1]||'AUTO');
     const texts={race:sources.race.text,standard:sources.standard?.text||'',recent:sources.recent?.text||'',form:sources.form?.text||'',pace:sources.race.paceText||'',training:sources.training?.text||'',comment:sources.comment?.text||''};
     // Keep provider text and collection timestamps with the imported draft.
     setScanText(texts);setHorses(next);setScanOpen(true);
     flash(`${next.length}頭を照合して入力しました。未取得項目は空欄です`);
+  };
+
+  const applyBatchResults = async (batch) => {
+    if(automaticSave.current)await automaticSave.current;
+    if(!storageReady || committing.current)throw new Error('保存処理中または保存領域が未準備です。再試行してください');
+    committing.current=true;
+    try{
+      const now=new Date().toISOString();
+      const plan=planResultImport(live.current.savedRaces,batch,now);
+      if(!plan.actions.length)throw new Error('反映できる未登録結果がありません');
+      const updates=new Map<string,any>(plan.actions.map(a=>[a.id,{...a.updated,learnedApplied:learningOn||!!live.current.savedRaces.find(r=>r.id===a.id)?.learnedApplied}]));
+      let next=live.current.savedRaces.map(r=>updates.get(r.id)||r);
+      let patch:any={};
+      if(learningOn){
+        const replay=replayLearning(next);
+        next=next.map(r=>updates.has(r.id)?{...r,learnedApplied:true,learningChanges:replay.details.get(r.id)||{},learningNoChange:!Object.keys(replay.details.get(r.id)||{}).length}:r);
+        patch={learned:replay.learned,historyCount:replay.count,learningHistory:[...learningHistory,{at:now,kind:'batch-result-replay',count:replay.count,values:replay.learned,resultIds:[...updates.keys()]}]};
+      }
+      next=next.map(r=>updates.has(r.id)?{...r,review:buildReview(r)}:r);
+      for(const r of next.filter(r=>updates.has(r.id)))if(resultIssues(r).length)throw new Error(resultIssues(r).join(' / '));
+      const active=next.find(r=>r.id===activeSavedRaceId&&updates.has(r.id));
+      if(active)patch.horses=active.horses;
+      await persist(next,patch);
+      setSavedRaces(next);
+      if(active){setHorses(active.horses);setResultEntryMode(false);}
+      if(patch.learned)setLearned(patch.learned);
+      if(patch.historyCount!==undefined)setHistoryCount(patch.historyCount);
+      if(patch.learningHistory)setLearningHistory(patch.learningHistory);
+      flash(`確定結果${updates.size}件を反映しました。予想順位は保持されています`);
+      return {updated:updates.size,learned:learningOn};
+    }finally{committing.current=false;}
   };
 
   const startBatchPrediction = (drafts) => {
@@ -3529,7 +3562,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.2</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.3</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>
@@ -3591,6 +3624,7 @@ export default function NARPredictionTool() {
       <details className="mx-3 mt-3 rounded-xl border bg-white p-3"><summary className="text-xs font-bold">指数の根拠・転入回数（分かる項目だけ）</summary><div className="text-[11px] mt-2">実測回数・最高指数の日付を記録。転入回数が不明なら直近5走からの推定と表示します。空欄を埋める必要はありません。</div><div className="overflow-x-auto"><table className="text-xs"><thead><tr><th>馬番・馬名</th><th>最高指数の日付</th><th>最高の馬場</th><th>距離実測本数</th><th>コース実測本数</th><th>転入後地方出走数</th><th>出走状態</th></tr></thead><tbody>{horses.map(h=><tr key={h.id}><td className="p-2 whitespace-nowrap">{h.umaban} {h.name}</td><td><input type="date" className="border p-1" value={h.bestDate||''} onChange={e=>updateHorse(h.id,'bestDate',e.target.value)}/></td><td><select className="border p-1" value={h.bestSurface||''} onChange={e=>updateHorse(h.id,'bestSurface',e.target.value)}><option value="">未確認</option><option>ダート</option><option>芝</option></select></td>{['distSamples','courseSamples','narStartsSinceTransfer'].map(key=><td key={key}><input className="border p-1 w-16" inputMode="numeric" value={h[key]??''} onChange={e=>updateHorse(h.id,key,e.target.value)}/></td>)}<td><select className="border p-1" value={h.raceStatus||''} onChange={e=>updateHorse(h.id,'raceStatus',e.target.value)}><option value="">出走予定</option><option>取消</option><option>除外</option></select></td></tr>)}</tbody></table></div></details>
 
       <BatchImportPanel inbox={batchInbox} onImport={data=>{setBatchInbox(data);setBatchSummary(null);}} onOpen={applySourceDraft} onRun={startBatchPrediction} ready={loaded&&storageReady&&!batchTask} summary={batchSummary} />
+      <ResultImportPanel records={savedRaces} onApply={applyBatchResults} ready={loaded&&storageReady&&!batchTask} />
 
       {/* テキスト一括入力 */}
       <div id="input-section" className="scroll-mt-28 mx-3 mt-3 overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-sm">

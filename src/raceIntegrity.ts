@@ -32,8 +32,8 @@ export function sameField(a: any, b: any): boolean {
 }
 export function predictionView(r: any): any {
   if (!r.predictionLock) return r;
-  const finishes = new Map((r.horses || []).map((h: any) => [String(h.id), h.finish]));
-  return { ...r, horses: r.predictionLock.horses.map((h: any) => ({ ...h, finish: finishes.get(String(h.id)) || '' })) };
+  const actual = new Map<string,any>((r.horses || []).map((h: any) => [String(h.id), h]));
+  return { ...r, horses: r.predictionLock.horses.map((h: any) => ({ ...h, finish: actual.get(String(h.id))?.finish || '', actualFinish:actual.get(String(h.id))?.actualFinish??null, raceStatus:actual.get(String(h.id))?.raceStatus??h.raceStatus??'' })) };
 }
 export function orderedPrediction(horses: any[]): any[] {
   return [...horses].filter(h => number(h.predictedScore) !== null || number(h._rank) !== null).sort((a,b) => {

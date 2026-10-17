@@ -65,3 +65,26 @@ export function indexFields(row:any,recent=false){
  const highest=c[3].replace(/\s+/g,' ').match(/^(.+?)(ダ|芝)\d{3,4}\s+[SMH]\s+(-?\d+(?:\.\d+)?)/);
  return {recentRuns,r1:recentRuns[0].index===null?'':String(recentRuns[0].index),r2:recentRuns[1].index===null?'':String(recentRuns[1].index),r3:recentRuns[2].index===null?'':String(recentRuns[2].index),avg5:number(c[9]),...(highest?{bestSurface:highest[2]==='芝'?'芝':'ダート'}:{})};
 }
+
+export function prepareBatch(data:any){
+ if(data?.format!=='nar-race-batch'||data.version!==1||!Array.isArray(data.races)||data.races.length>100||!Array.isArray(data.errors)||data.errors.length>100)throw Error('一括予想ファイルの形式が違います');
+ str(data.raceDate,10);if(!/^\d{4}-\d{2}-\d{2}$/.test(data.raceDate)||new Date(data.raceDate+'T00:00:00Z').toISOString().slice(0,10)!==data.raceDate)throw Error('対象日が不正です');
+ str(data.createdAt,40);if(!Number.isFinite(Date.parse(data.createdAt))||Date.parse(data.createdAt)>Date.now()+300000)throw Error('ファイル作成日時が不正です');
+ if(!Number.isInteger(data.expectedTotal)||data.expectedTotal<1||data.expectedTotal>100||data.expectedTotal!==data.races.length+data.errors.length)throw Error('対象数と取得済み・取得失敗の件数が一致しません');
+ const seen=new Set(),drafts=[];
+ const key=(track:string,raceNo:string)=>`${data.raceDate}|${track}|${raceNo}`;
+ for(const r of data.races){
+  if(!Array.isArray(r?.bundles))throw Error('レースの取得データがありません');
+  const d=prepareSources(r.bundles);
+  if(d.meta.raceDate!==data.raceDate)throw Error('異なる開催日が混在しています');
+  const k=key(d.meta.track,d.meta.raceNo);if(seen.has(k))throw Error('同じレースが重複しています');seen.add(k);
+  drafts.push({...d,key:k});
+ }
+ const errors=data.errors.map(e=>{
+  if(!TRACKS.includes(e?.track)||!/^([1-9]|1[0-2])$/.test(e.raceNo))throw Error('取得失敗レースの情報が不正です');
+  str(e.message,500);const k=key(e.track,e.raceNo);if(seen.has(k))throw Error('取得済みと取得失敗に同じレースがあります');seen.add(k);
+  return {key:k,track:e.track,raceNo:e.raceNo,message:e.message};
+ });
+ drafts.sort((a,b)=>a.meta.track.localeCompare(b.meta.track,'ja')||Number(a.meta.raceNo)-Number(b.meta.raceNo));
+ return {raceDate:data.raceDate,expectedTotal:data.expectedTotal,createdAt:data.createdAt,drafts,errors};
+}

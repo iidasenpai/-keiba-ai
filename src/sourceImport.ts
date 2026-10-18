@@ -25,7 +25,7 @@ export function prepareSources(bundles:any[]) {
   for(const p of b.pages){
    if(!KINDS.includes(p?.kind))throw Error('未対応のデータ種別です');
    const link=urlKind(str(p.url,500));if(link.kind!==p.kind)throw Error('データ種別とURLが一致しません');
-   const m=p.meta;if(m){for(const k of ['raceDate','track','raceNo','distance'])str(m[k],30);for(const k of ['raceName','startTime','going'])if(m[k]!==undefined)str(m[k],200);}
+   const m=p.meta;if(m?.surface!==undefined&&!['ダート','芝'].includes(m.surface))throw Error('馬場種別が不正です');if(m){for(const k of ['raceDate','track','raceNo','distance'])str(m[k],30);for(const k of ['raceName','startTime','going'])if(m[k]!==undefined)str(m[k],200);}
    if(!m||!/^\d{4}-\d{2}-\d{2}$/.test(m.raceDate)||new Date(m.raceDate+'T00:00:00Z').toISOString().slice(0,10)!==m.raceDate||!TRACKS.includes(m.track)||!/^([1-9]|1[0-2])$/.test(m.raceNo)||!/^\d{3,4}$/.test(m.distance))throw Error('開催情報が不正です');
    if(m.startTime&&!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(m.startTime))throw Error('発走時刻が不正です');
    const day=m.raceDate.replaceAll('-','');if(day.slice(0,4)!==link.id.slice(0,4)||(link.u.hostname==='nar.sp.netkeiba.com'?(link.id.slice(6,10)!==day.slice(4)||Number(link.id.slice(-2))!==Number(m.raceNo)):link.id.slice(-4)!==day.slice(4)))throw Error('開催日・Rと参照元IDが違います');

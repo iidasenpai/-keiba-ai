@@ -1048,7 +1048,7 @@ export default function NARPredictionTool() {
         const rend = ri + 1 < raceStarts.length ? raceStarts[ri + 1].i : block.length;
         const seg = block.slice(rs.i, rend);
         const segJoin = seg.join(" ");
-        const dm = segJoin.match(/ダ(\d{3,4})/);
+        const dm = segJoin.match(surface==='芝'?/芝(\d{3,4})/:/ダ(\d{3,4})/);
         const fs = segJoin.match(/(\d{1,2})頭/);
         let positions = [];
         // 通過順はサイトによって「--」の次行だったり、そのまま1行で並ぶ。
@@ -1087,7 +1087,7 @@ export default function NARPredictionTool() {
       h.styleConfidence = totalVote > 0 && top ? Math.round((top[1] / totalVote) * 100) : 0;
 
       const escapedTrack = String(track).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const recRe = new RegExp(`${escapedTrack}ダ${Number(distance)}m\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)`);
+      const recRe = new RegExp(`${escapedTrack}${surface==='芝'?'芝':'ダ'}${Number(distance)}m\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)`);
       const rec = joined.match(recRe);
       if (rec) h.courseRecord = { win:Number(rec[1]), second:Number(rec[2]), third:Number(rec[3]), other:Number(rec[4]) };
     });
@@ -3315,7 +3315,7 @@ export default function NARPredictionTool() {
       // Keep the scored inputs unchanged. Sanitization belongs before scoring, never after it.
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.3', raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.4', raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3474,7 +3474,7 @@ export default function NARPredictionTool() {
 
   const applySourceDraft = (draft) => {
     const {sources,meta}=draft;
-    const inputContext={track:meta.track,surface:'ダート',distance:meta.distance,raceClass:''};
+    const inputContext={track:meta.track,surface:meta.surface==='芝'?'芝':'ダート',distance:meta.distance,raceClass:''};
     const allowed=['umaban','name','sex','jockey','weight','odds','ninki','bodyChange','raceStatus'];
     let next=sources.race.rows.map(row=>({...emptyHorse(),...Object.fromEntries(allowed.map(k=>[k,String(row[k]??'')])),finish:'',actualFinish:null}));
     if(sources.standard)next=next.map(h=>({...h,...indexFields(sources.standard.rows.find(r=>r.umaban===h.umaban))}));
@@ -3485,7 +3485,7 @@ export default function NARPredictionTool() {
     // Source timestamps remain input provenance, never a pre-race prediction timestamp.
     next=next.map(h=>({...h,inputSources:Object.values(sources).map((p:any)=>({kind:p.kind,url:p.url,capturedAt:p.capturedAt})),finish:'',actualFinish:null}));
     setActiveSavedRaceId(null);setResultEntryMode(false);setResultOrderInput('');setRevisionOf(null);
-    setRaceDate(meta.raceDate);setStartTime(meta.startTime||'');setTrack(meta.track);setDistance(meta.distance);setSurface('ダート');setRaceNo(meta.raceNo);setRaceName(meta.raceName||'');setRaceClass('');
+    setRaceDate(meta.raceDate);setStartTime(meta.startTime||'');setTrack(meta.track);setDistance(meta.distance);setSurface(inputContext.surface);setRaceNo(meta.raceNo);setRaceName(meta.raceName||'');setRaceClass('');
     const goingMap={'稍':'稍重','不':'不良'};setGoing(goingMap[meta.going]||(['良','稍重','重','不良'].includes(meta.going)?meta.going:'未確認'));
     setSourceName(sources.training||sources.comment?'netkeiba / 競馬ブック':'netkeiba');setSourceRaceId(draft.sourceRaceId);
     const providerPace=sources.race.paceText?.match(/ペース\s*([SMH])/);setPaceType(providerPace?.[1]||'AUTO');
@@ -3562,7 +3562,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.3</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.4</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>

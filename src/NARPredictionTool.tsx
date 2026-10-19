@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { SNAPSHOT_KEY } from "./storage";
 import { finite, validWeights, observed, cleanInputs, fieldAudit, estimatePace, paceExpected, scoreParts, fieldProbabilities, scoreComment, MODEL_VERSION, MODEL_BUILD, ACTIVE_FACTORS, eligibleHistory, eventKey, raceInstant, outcomeStats, verifiedBeforeStart, latestLearning, encodeArchive, decodeArchive, nonStarter } from './modelSafety';
+import {planDraftUpdate,sourceFingerprint,missingSupplemental,inputWarnings,savedForDraft} from './predictionUpdates';
+import ModelComparisonPanel from './ModelComparisonPanel';
 import AuditPanel from './AuditPanel';
 import BatchImportPanel from './BatchImportPanel';
 import ResultImportPanel from './ResultImportPanel';
@@ -3296,32 +3298,37 @@ export default function NARPredictionTool() {
     updatedAt: new Date().toISOString(),
   });
 
-  const saveRaceForLater = async () => {
+  const saveRaceForLater = async (options:any = {}) => {
     if (automaticSave.current) await automaticSave.current;
     if (!storageReady) { flash('保存データの読込に失敗しています。今の入力を「全データ保存」で保全してください'); return; }
     if (committing.current) { flash('別の保存処理中です。完了後に再試行してください'); return; }
     if (!horses.length || !horses.some(h=>!nonStarter(h))) { flash('出走予定馬を入力してください'); return; }
     committing.current = true;
     try {
-      const existing = live.current.savedRaces.find((r:any)=>r.id===activeSavedRaceId);
-      if (existing?.status === 'completed' || existing?.predictionLock) throw new Error('固定済み予測は更新できません。結果は「結果入力」から保存してください。再予測は新規保存になります');
+      const updateDraft=options?.updateDraft;
+      const updatePlan=updateDraft?planDraftUpdate(live.current.savedRaces,updateDraft):null;
+      if(updatePlan&&!updatePlan.canUpdate)throw new Error(updatePlan.reason);
+      const replacing=updatePlan?.record;
+      const existing = replacing || live.current.savedRaces.find((r:any)=>r.id===activeSavedRaceId);
+      if (!replacing && (existing?.status === 'completed' || existing?.predictionLock)) throw new Error('固定済み予測は更新できません。結果は「結果入力」から保存してください。再予測は新規保存になります');
       if(!raceDate)throw new Error('開催日を入力してください');
       if(startTime&&!scheduledStart)throw new Error('発走時刻が不正です');
       const duplicate=live.current.savedRaces.find(r=>eventKey(r)===eventKey({raceDate,track,raceNo,sourceName,sourceRaceId}));
-      if(duplicate&&duplicate.id!==revisionOf)throw new Error('同じレースが保存済みです。保存履歴から読み込み、再予測を選んでください');
+      if(duplicate&&duplicate.id!==revisionOf&&duplicate.id!==replacing?.id)throw new Error('同じレースが保存済みです。保存履歴から読み込み、再予測を選んでください');
       const id = existing?.id || crypto.randomUUID();
       const snapshot = currentRaceSnapshot(id, existing || {});
-      if (existing && !sameField(existing,snapshot)) throw new Error('別の出走馬です。新しい出馬表として取り込んで保存してください');
+      if (existing && !replacing && !sameField(existing,snapshot)) throw new Error('別の出走馬です。新しい出馬表として取り込んで保存してください');
       // Keep the scored inputs unchanged. Sanitization belongs before scoring, never after it.
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.4', raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
+      if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.5', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
       await persist(next);
       setSavedRaces(next); setActiveSavedRaceId(id); setResultEntryMode(false);
-      flash('事前予測を固定して保存しました');
+      flash(replacing?'新しい入力で再予想を保存しました。変更前の固定予想は履歴に残っています':'事前予測を固定して保存しました');
       return {ok:true,id};
     } catch(e) { const error=e instanceof Error ? e.message : '保存に失敗しました';flash(error);return {ok:false,error}; }
     finally { committing.current = false; }
@@ -3332,7 +3339,7 @@ export default function NARPredictionTool() {
     const legacyRaceNo = String(race.raceNo || race.raceName || "1").match(/(?:^|\D)(1[0-2]|[1-9])(?:R)?(?:\D|$)/)?.[1] || "1";
     setRaceNo(legacyRaceNo);
     setTrack(race.track || "大井");
-    setSurface("ダート");
+    setSurface(race.surface==='芝'?'芝':'ダート');
     setDistance(race.distance || "");
     setGoing(race.going || "良");
     setRaceClass(race.raceClass||"");
@@ -3526,10 +3533,10 @@ export default function NARPredictionTool() {
     }finally{committing.current=false;}
   };
 
-  const startBatchPrediction = (drafts) => {
+  const startBatchPrediction = (drafts, options:any = {}) => {
     if(batchTask || !storageReady)return;
     batchCancel.current=false;setBatchSummary(null);
-    setBatchTask({id:crypto.randomUUID(),drafts,index:0,phase:'load',results:[]});
+    setBatchTask({id:crypto.randomUUID(),drafts,options,index:0,phase:'load',results:[]});
   };
   useEffect(()=>{
     if(!batchTask)return;
@@ -3546,9 +3553,10 @@ export default function NARPredictionTool() {
     batchSaving.current=token;
     (async()=>{
       let result;
-      if(!draft.meta.startTime)result={ok:false,error:'発走時刻が未取得のため、一括保存しませんでした'};
+      if(missingSupplemental(draft).length&&!task.options?.allowIncomplete)result={ok:false,error:'調教・厩舎コメントが未取得です。補完版を読み込むか、未取得を承知して保存を選んでください'};
+      else if(!draft.meta.startTime)result={ok:false,error:'発走時刻が未取得のため、一括保存しませんでした'};
       else if(sourceRaceId!==draft.sourceRaceId || raceDate!==draft.meta.raceDate || track!==draft.meta.track || raceNo!==draft.meta.raceNo || horses.length!==draft.sources.race.roster.length)result={ok:false,error:'入力の反映を確認できず保存しませんでした'};
-      else result=await saveRaceForLater() || {ok:false,error:'保存処理中または保存領域が未準備です。再試行してください'};
+      else result=await saveRaceForLater({updateDraft:task.options?.updateExisting&&savedForDraft(live.current.savedRaces,draft).length?draft:null,fingerprint:sourceFingerprint(draft)}) || {ok:false,error:'保存処理中または保存領域が未準備です。再試行してください'};
       const results=[...task.results,{...result,label:`${draft.meta.track}${draft.meta.raceNo}R`}];
       if(batchCancel.current || task.index+1>=task.drafts.length)finish(results,batchCancel.current);
       else setBatchTask({...task,index:task.index+1,phase:'load',results});
@@ -3562,7 +3570,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.4</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.5</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>
@@ -3623,7 +3631,8 @@ export default function NARPredictionTool() {
 
       <details className="mx-3 mt-3 rounded-xl border bg-white p-3"><summary className="text-xs font-bold">指数の根拠・転入回数（分かる項目だけ）</summary><div className="text-[11px] mt-2">実測回数・最高指数の日付を記録。転入回数が不明なら直近5走からの推定と表示します。空欄を埋める必要はありません。</div><div className="overflow-x-auto"><table className="text-xs"><thead><tr><th>馬番・馬名</th><th>最高指数の日付</th><th>最高の馬場</th><th>距離実測本数</th><th>コース実測本数</th><th>転入後地方出走数</th><th>出走状態</th></tr></thead><tbody>{horses.map(h=><tr key={h.id}><td className="p-2 whitespace-nowrap">{h.umaban} {h.name}</td><td><input type="date" className="border p-1" value={h.bestDate||''} onChange={e=>updateHorse(h.id,'bestDate',e.target.value)}/></td><td><select className="border p-1" value={h.bestSurface||''} onChange={e=>updateHorse(h.id,'bestSurface',e.target.value)}><option value="">未確認</option><option>ダート</option><option>芝</option></select></td>{['distSamples','courseSamples','narStartsSinceTransfer'].map(key=><td key={key}><input className="border p-1 w-16" inputMode="numeric" value={h[key]??''} onChange={e=>updateHorse(h.id,key,e.target.value)}/></td>)}<td><select className="border p-1" value={h.raceStatus||''} onChange={e=>updateHorse(h.id,'raceStatus',e.target.value)}><option value="">出走予定</option><option>取消</option><option>除外</option></select></td></tr>)}</tbody></table></div></details>
 
-      <BatchImportPanel inbox={batchInbox} onImport={data=>{setBatchInbox(data);setBatchSummary(null);}} onOpen={applySourceDraft} onRun={startBatchPrediction} ready={loaded&&storageReady&&!batchTask} summary={batchSummary} />
+      <BatchImportPanel records={savedRaces} inbox={batchInbox} onImport={data=>{setBatchInbox(data);setBatchSummary(null);}} onOpen={applySourceDraft} onRun={startBatchPrediction} ready={loaded&&storageReady&&!batchTask} summary={batchSummary} />
+      <ModelComparisonPanel records={savedRaces} />
       <ResultImportPanel records={savedRaces} onApply={applyBatchResults} ready={loaded&&storageReady&&!batchTask} />
 
       {/* テキスト一括入力 */}
@@ -3734,7 +3743,7 @@ export default function NARPredictionTool() {
             <div className="mb-2 flex items-center justify-between gap-2"><div><div className="font-black text-indigo-900">🎯 予想結果</div><div className="mt-0.5 text-[10px] text-gray-400">◎○は頭取り補正、▲△☆は過去の3着内実績でヒモ候補だけ小幅補正</div></div><div className="shrink-0 text-[10px] font-bold text-indigo-500">印順</div></div>
             <div className="space-y-2 sm:hidden">
               {raceAnalytics.marked.map((h)=><div key={`marked-card-${h.id}`} className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span className="text-rose-700">参考WIN <b>{h._winRate!==undefined?`${Math.round(Number(h._winRate)*100)}%`:"-"}</b></span><span className="text-emerald-700">参考PLACE <b>{h._placeRate!==undefined?`${Math.round(Number(h._placeRate)*100)}%`:"-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span>{normalizeTrackName(track)==="船橋"&&Math.abs(Number(h._funabashiAdj||0))>=0.05&&<span className="text-cyan-700">船橋補正 {h._funabashiAdj>0?"+":""}{Number(h._funabashiAdj).toFixed(1)}</span>}<span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{COMMENT_TRAINING_TRACKS.includes(track)&&<span className="text-orange-700">調教 <b>{h._trainingScore!==null&&h._trainingScore!==undefined?`${h.training||"B"} ${Math.round(Number(h._trainingScore))}点`:"未入力"}</b></span>}{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
+                <div className="flex items-center gap-3"><div className="text-2xl font-black text-indigo-800">{h._displayMark}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="rounded-full bg-white px-2 py-0.5 text-xs font-black text-gray-700">{h.umaban}</span><span className="truncate text-sm font-black text-gray-900">{h.name}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-600"><span>総合 <b className="text-gray-900">{h._finalScore?.toFixed(1) ?? "-"}</b></span><span className="text-rose-700">未校正WIN <b>{h._winRate!==undefined?`${Math.round(Number(h._winRate)*100)}%`:"-"}</b></span><span className="text-emerald-700">未校正PLACE <b>{h._placeRate!==undefined?`${Math.round(Number(h._placeRate)*100)}%`:"-"}</b></span><span>近5走 <b>{h._recentIndex!==null&&h._recentIndex!==undefined?Number(h._recentIndex).toFixed(1):"-"}</b></span><span>同場同距離 {h._recentMeta?.sameCount||0}本</span>{normalizeTrackName(track)==="船橋"&&Math.abs(Number(h._funabashiAdj||0))>=0.05&&<span className="text-cyan-700">船橋補正 {h._funabashiAdj>0?"+":""}{Number(h._funabashiAdj).toFixed(1)}</span>}<span>{h.ninki||"-"}人気 / {h.odds||"-"}倍</span>{COMMENT_TRAINING_TRACKS.includes(track)&&<span className="text-orange-700">調教 <b>{h._trainingScore!==null&&h._trainingScore!==undefined?`${h.training||"B"} ${Math.round(Number(h._trainingScore))}点`:"未入力"}</b></span>}{Math.abs(Number(h._headAdj||0))>=0.05&&<span className="text-indigo-700">頭補正 {h._headAdj>0?"+":""}{Number(h._headAdj).toFixed(1)}</span>}{Math.abs(Number(h._himoAdj||0))>=0.05&&<span className="text-emerald-700">ヒモ補正 {h._himoAdj>0?"+":""}{Number(h._himoAdj).toFixed(1)}</span>}</div></div></div>
               </div>)}
             </div>
             <div className="hidden overflow-x-auto sm:block">
@@ -3997,8 +4006,10 @@ export default function NARPredictionTool() {
 
       <div className="mx-3 mt-3 grid gap-3 md:grid-cols-2">
         <div className="rounded-xl border border-sky-200 bg-white p-3 shadow-sm">
-          <div className="flex items-center justify-between"><div className="font-black text-sky-900">🛡️ 予想の検証状況</div><div className="text-2xl font-black text-sky-700">{confidence.grade} <span className="text-sm">{confidence.score}/100 入力充足</span></div></div>
+          <div className="flex items-center justify-between"><div className="font-black text-sky-900">🛡️ 予想の検証状況</div><div className="text-2xl font-black text-sky-700">{confidence.grade} <span className="text-sm">{confidence.score}/100 指数の入力充足</span></div></div>
           <div className="mt-2 text-[11px] text-gray-600">{confidence.reasons.join("・")}</div>
+          <p className="mt-2 text-xs font-bold text-amber-900">点差の大きさは、勝つ確率や利益を保証しません。</p>
+          {inputWarnings(ranked,track).length>0&&<p role="status" className="mt-2 rounded bg-amber-100 p-2 text-xs text-amber-950">未確認の入力：{inputWarnings(ranked,track).join(' / ')}。入力充足点とは別に確認してください。</p>}
         </div>
         <div className="rounded-xl border border-emerald-200 bg-white p-3 shadow-sm">
           <div className="flex items-center justify-between"><div className="font-black text-emerald-900">✅ 実測データ充足</div><div className="text-xl font-black text-emerald-700">{dataQuality.score}/100</div></div>
@@ -4113,6 +4124,7 @@ export default function NARPredictionTool() {
                     {race.status === "completed" && <button onClick={()=>setReviewRaceId(reviewRaceId===race.id?null:race.id)} className="rounded bg-indigo-700 px-3 py-1.5 text-[11px] font-bold text-white">AI回顧</button>}
                     <button onClick={() => deleteSavedRace(race.id)} className="rounded border border-red-200 px-3 py-1.5 text-[11px] font-bold text-red-500">保護中</button>
                   </div>
+                  {!!race.predictionRevisions?.length&&<details className="mt-2 rounded border p-2 text-xs"><summary>変更前の固定予想 {race.predictionRevisions.length}件</summary>{race.predictionRevisions.map((rev:any,i:number)=><div key={i} className="mt-2 border-t pt-2"><div>{new Date(rev.predictionLock.lockedAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})} 固定／{rev.reason}</div><div>{[...rev.predictionLock.horses].filter(h=>num(h._rank)!==null).sort((a,b)=>a._rank-b._rank).slice(0,5).map(h=>`${h._rank}位 ${h.umaban}番 ${h.name}`).join(' / ')}</div></div>)}</details>}
                   {reviewRaceId===race.id && (()=>{const rv=race.review||buildReview(race); return rv?<div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50 p-3"><div className="font-black text-indigo-900">AI回顧 評価 {rv.grade}</div><div className="mt-1 text-xs">実着順: {rv.actual.map((h:any)=>`${h.finish}着 ${h.umaban} ${h.name}`).join(" / ")}</div><div className="mt-2 space-y-1 text-[11px] text-indigo-900">{rv.notes.map((n:string,i:number)=><div key={i}>・{n}</div>)}</div></div>:<div className="mt-2 text-xs text-gray-400">回顧に必要な着順が不足しています</div>})()}
                 </div>
               ))}

@@ -42,6 +42,10 @@ export function inputWarnings(horses:any[],track:string){
   if(t<active.length)warnings.push(`調教入力 ${t}/${active.length}頭`);
   if(c<active.length)warnings.push(`厩舎コメント入力 ${c}/${active.length}頭`);
  }
+ const undated=active.filter(h=>(h.recentRuns||[]).some(r=>finite(r.index)!==null&&!r.date&&!r.raceDate)).length;
+ if(undated)warnings.push(`近走指数の日付未確認 ${undated}/${active.length}頭（日数による減衰は未適用）`);
+ const bestUndated=active.filter(h=>finite(h.best)!==null&&!h.bestDate).length;
+ if(bestUndated)warnings.push(`最高指数の日付未確認 ${bestUndated}/${active.length}頭`);
  if(active.some(h=>finite(h._base)===null))warnings.push('指数不足の馬が含まれます');
  return warnings;
 }

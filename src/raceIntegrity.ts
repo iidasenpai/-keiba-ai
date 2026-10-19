@@ -47,7 +47,7 @@ export function orderedPrediction(horses: any[]): any[] {
 export function chronological(races: any[]): any[] {
   return [...races].sort((a,b) => String(a.firstCompletedAt || a.completedAt || a.savedAt || '').localeCompare(String(b.firstCompletedAt || b.completedAt || b.savedAt || '')) || String(a.id).localeCompare(String(b.id)));
 }
-export function makeLock(current: any[], modelA: any[], metadata: any, now: string): any {
+export function makeLock(current: any[], modelA: any[], metadata: any, now: string, candidates: any = {}): any {
   if (current.some(h => number(h.finish) !== null || number(h.actualFinish)!==null)) throw new Error('着順入力済みの予測は事前固定できません');
   if(current.some(h=>!String(h.name||'').trim()))throw new Error('馬名が未照合です。出馬表を確認してください');
   if(current.some(h=>!h.id||!Number.isInteger(number(h.umaban))||Number(h.umaban)<1)||new Set(current.map(h=>String(h.id))).size!==current.length||new Set(current.map(h=>String(h.umaban))).size!==current.length)throw new Error('出走馬ID・馬番が重複または不正です');
@@ -59,7 +59,8 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
     current: rows(orderedPrediction(current)),
     A: { version: 'prospective-A-v12', weights: [15,85,0,0], rule: 'v12修正済み補正を共有し基礎重みだけ変更。旧Aとは別集計。', predictions: rows(ordered), diagnostics:modelA.map(h=>({id:h.id,base:h._base,coreWeights:h._coreWeights,context:h._contextComponents,contextScale:h._contextScale,rawScore:h._rawScore,winScore:h._winScore,placeScore:h._placeScore,headAdj:h._headAdj,marketAdj:h._marketAnchorAdj,winAdj:h._winAdj,placeAdj:h._placeAdj,himoAdj:h._himoAdj})) },
     Recent: {version:'recent-only-v12',rule:'保存近走指数のみ・補正なし',predictions:modelRows(current)},
-    Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')}
+    Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')},
+    ...(Array.isArray(candidates.Balanced)?{Balanced:{version:'balanced-v12.6',weights:[15,70,7.5,7.5],rule:'近走70・最高15・距離7.5・コース7.5。現モデルとは別の検証候補。',predictions:rows(orderedPrediction(candidates.Balanced)),diagnostics:candidates.Balanced.map(h=>({umaban:h.umaban,base:h._base,coreWeights:h._coreWeights,score:h._finalScore}))}}:{})
   } };
 }
 export function applyResult(record: any, inputField: any, order: string[], now: string): any {

@@ -2743,7 +2743,7 @@ export default function NARPredictionTool() {
       };
     });
     };
-    return { current: calculate(weights), A: calculate({ best:15, avg5:85, dist:0, course:0 }) };
+    return { current: calculate(weights), A: calculate({ best:15, avg5:85, dist:0, course:0 }), Balanced: calculate({ best:15, avg5:70, dist:7.5, course:7.5 }) };
   }, [horses, weights, distance, track, surface, raceDate, scheduledStart, decayScale, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning, conditionReliability]);
 
   const computed = modelComputed.current;
@@ -2821,7 +2821,7 @@ export default function NARPredictionTool() {
       return { ...h, _rankWinRate:h._winRate, _rankPlaceRate:h._placeRate, _winRate:reference?.win??0, _placeRate:reference?.place??0, _probabilityLabel:'未校正のモデル参考率', _unknownAbility:h._base===null&&!nonStarter(h), _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
     };
-    return { current: calculate(computed), A: calculate(modelComputed.A) };
+    return { current: calculate(computed), A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced) };
   }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn]);
 
   const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
@@ -3322,7 +3322,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.5', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt);
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.6', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3570,7 +3570,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.5</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.6</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>

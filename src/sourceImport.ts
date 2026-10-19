@@ -3,6 +3,7 @@ const KINDS=['race','form','standard','recent','training','comment'];
 const TRACKS=['帯広','門別','盛岡','水沢','浦和','船橋','大井','川崎','金沢','笠松','名古屋','園田','姫路','高知','佐賀'];
 const tidy=(x:any)=>String(x??'').normalize('NFKC').replace(/[\s・･]/g,'');
 const str=(x:any,max=500000)=>{if(typeof x!=='string'||x.length>max)throw Error('文字列の形式またはサイズが不正です');return x;};
+const validIndexDate=(x:any)=>typeof x==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(x)&&Number.isFinite(Date.parse(x+'T00:00:00Z'))&&new Date(x+'T00:00:00Z').toISOString().slice(0,10)===x;
 function urlKind(url:string){
  const u=new URL(url);if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)throw Error('参照URLが不正です');
  if(u.hostname==='nar.sp.netkeiba.com'){
@@ -11,7 +12,7 @@ function urlKind(url:string){
   return {u,id,kind};
  }
  if(u.hostname==='s.keibabook.co.jp'){
-  const m=u.pathname.match(/^\/chihou\/(cyokyo|danwa)\/1\/(\d{16})$/);if(!m)throw Error('競馬ブックURLが不正です');
+  const m=u.pathname.match(/^\/chihou\/(cyokyo|danwa)\/(?:1|3)\/(\d{16})$/);if(!m)throw Error('競馬ブックURLが不正です');
   return {u,id:m[2],kind:m[1]==='cyokyo'?'training':'comment'};
  }
  throw Error('未対応の参照サイトです');
@@ -37,6 +38,9 @@ export function prepareSources(bundles:any[]) {
     if(p.kind==='race')for(const k of ['sex','jockey','weight','odds','ninki','bodyChange','raceStatus'])if(p.rows[i][k]!==undefined)str(p.rows[i][k],100);
     if(['standard','recent'].includes(p.kind)){
      const c=p.rows[i].cells;if(!Array.isArray(c)||c.length!==(p.kind==='standard'?15:12)||c.some(v=>typeof v!=='string'||v.length>200)||c[0]!==h.umaban||tidy(c[2])!==tidy(h.name))throw Error('指数表の列数・馬情報が変わっています');
+     const row=p.rows[i];
+     if(row.bestDate!==undefined&&row.bestDate!==''&&(!validIndexDate(row.bestDate)||row.bestDate>=m.raceDate))throw Error('最高指数の日付が不正です');
+     if(row.runDates!==undefined&&(!Array.isArray(row.runDates)||row.runDates.length!==5||row.runDates.some((d:any)=>d!==null&&d!==''&&(!validIndexDate(d)||d>=m.raceDate))))throw Error('近5走の日付が不正です');
     }
    }
    if(sources[p.kind])throw Error(`${p.kind}が重複しています。古いファイルを外してください`);
@@ -56,10 +60,10 @@ export function prepareSources(bundles:any[]) {
 // Preserve five slots, including non-starters. The adjacent annual best is cells[3].
 export function indexFields(row:any,recent=false){
  const c=row.cells,number=(v:any)=>/^-?\d+(?:\.\d+)?\*?$/.test(String(v))?String(v).replace('*',''):'';
- if(!recent)return Object.fromEntries(['best','avg5','dist','course','r3','r2','r1'].map((k,i)=>[k,number(c[i+3])]));
- const oldToNew=c.slice(4,9).map((v:string)=>{
+ if(!recent)return {...Object.fromEntries(['best','avg5','dist','course','r3','r2','r1'].map((k,i)=>[k,number(c[i+3])])),...(validIndexDate(row.bestDate)&&number(c[3])!==''?{bestDate:row.bestDate}:{})};
+ const oldToNew=c.slice(4,9).map((v:string,i:number)=>{
   const m=v.replace(/\s+/g,' ').match(/^(.+?)(ダ|芝)(\d{3,4})\s+([SMH])\s+(-?\d+(?:\.\d+)?)\s*\(([-+]?\d+(?:\.\d+)?)\)$/);
-  return m?{track:m[1],surface:m[2]==='芝'?'芝':'ダート',distance:Number(m[3]),pace:m[4],index:Number(m[5]),adjustment:Number(m[6]),source:['東京','中山','京都','阪神','中京','新潟','福島','小倉','札幌','函館'].includes(m[1])?'JRA':'NAR'}:{index:null,missing:true};
+  return m?{track:m[1],surface:m[2]==='芝'?'芝':'ダート',distance:Number(m[3]),pace:m[4],index:Number(m[5]),adjustment:Number(m[6]),source:['東京','中山','京都','阪神','中京','新潟','福島','小倉','札幌','函館'].includes(m[1])?'JRA':'NAR',...(validIndexDate(row.runDates?.[i])?{date:row.runDates[i]}:{})}:{index:null,missing:true};
  });
  const recentRuns=oldToNew.reverse();
  const highest=c[3].replace(/\s+/g,' ').match(/^(.+?)(ダ|芝)\d{3,4}\s+[SMH]\s+(-?\d+(?:\.\d+)?)/);

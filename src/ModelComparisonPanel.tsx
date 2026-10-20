@@ -1,39 +1,27 @@
 import {useMemo,useState} from 'react';
-import {MODEL_VERSION,MODEL_BUILD,verifiedBeforeStart,nonStarter,finite} from './modelSafety';
+import {verifiedBeforeStart,nonStarter,finite} from './modelSafety';
 import {resultIssues} from './raceIntegrity';
-export function fixedComparison(records:any[],date='',keys=['current','A','Recent','Place']){
- const rows=records.filter(r=>r.status==='completed'&&!r.evaluationExcluded&&!resultIssues(r).length&&verifiedBeforeStart(r)&&r.predictionLock?.modelVersion===MODEL_VERSION&&r.predictionLock?.build===MODEL_BUILD&&(!date||r.raceDate===date));
- const totals=Object.fromEntries(keys.map(k=>[k,{n:0,win:0,place:0,top5:0}]));
- let unranked=0,comparable=0;
- for(const r of rows){
-  const active=new Set(r.horses.filter(h=>!nonStarter(h)).map(h=>String(h.umaban)));
-  const actual=r.horses.filter(h=>[1,2,3].includes(finite(h.finish))).sort((a,b)=>Number(a.finish)-Number(b.finish));
-  const sets=Object.fromEntries(Object.keys(totals).map(k=>{const m=r.predictionLock.models?.[k];return [k,[...(Array.isArray(m)?m:m?.predictions||[])].filter(h=>active.has(String(h.umaban))&&finite(h.rank)!==null).sort((a,b)=>a.rank-b.rank)];}));
-  if(!sets.current.length){unranked++;continue;}
-  if(Object.values(sets).some(xs=>!xs.length))continue;
-  comparable++;
-  for(const [k,picks] of Object.entries(sets)){
-   const t=totals[k];t.n++;const f=actual.find(h=>String(h.umaban)===String(picks[0].umaban))?.finish;
-   t.win+=Number(Number(f)===1);t.place+=Number([1,2,3].includes(Number(f)));
-   const top=new Set(picks.slice(0,5).map(h=>String(h.umaban)));t.top5+=Number(actual.length===3&&actual.every(h=>top.has(String(h.umaban))));
-  }
- }
- return {totals,comparable,unranked,verified:rows.length};
-}
-const label={current:'現モデル',A:'近走重視A',Recent:'近走指数のみ',Place:'3着内向け候補',Balanced:'近走70候補'};
+export {fixedComparison,distanceGroup} from './modelComparison';
+import {fixedComparison} from './modelComparison';
+const label={current:'現モデル（保存時）',A:'近走重視A',Recent:'近走指数のみ',Place:'3着内向け候補',Balanced:'近走70候補',Simple85:'近走85・補助点上限候補',Simple85Core:'近走85・基礎点のみ'};
 export default function ModelComparisonPanel({records}:{records:any[]}){
  const dates=useMemo(()=>[...new Set(records.filter(r=>r.status==='completed').map(r=>r.raceDate).filter(Boolean))].sort().reverse(),[records]);
- const [chosen,setChosen]=useState('latest');const date=chosen==='latest'?dates[0]||'':chosen;
- const data=useMemo(()=>fixedComparison(records,date),[records,date]);
- const candidate=useMemo(()=>fixedComparison(records.filter(r=>r.predictionLock?.models?.Balanced?.version==='balanced-v12.6'),date,['current','Balanced']),[records,date]);
+ const builds=useMemo(()=>[...new Set(records.filter(r=>r.status==='completed'&&verifiedBeforeStart(r)).sort((a,b)=>String(b.predictionLock.lockedAt).localeCompare(String(a.predictionLock.lockedAt))).map(r=>r.predictionLock?.build).filter(Boolean))] as string[],[records]);
+ const [chosen,setChosen]=useState('latest'),[buildChosen,setBuild]=useState('latest'),[track,setTrack]=useState(''),[distance,setDistance]=useState('');
+ const date=chosen==='latest'?dates[0]||'':chosen,build=buildChosen==='latest'?builds[0]:buildChosen;
+ const options={track,distance,build};
+ const data=fixedComparison(records,date,undefined,options),balanced=fixedComparison(records.filter(r=>r.predictionLock?.models?.Balanced?.version==='balanced-v12.6'),date,['current','Balanced'],options);
+ const candidate=fixedComparison(records.filter(r=>r.predictionLock?.models?.Simple85?.version==='simple85-v12.7'),date,['current','Simple85','Simple85Core'],options);
  const pct=(n,d)=>d?`${n}/${d} (${(100*n/d).toFixed(1)}%)`:'未集計';
- return <section className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 text-xs">
-  <details><summary className="font-black text-indigo-950">保存した事前予想でモデルを比較</summary>
-   <label className="mt-2 block">対象日 <select aria-label="モデル比較の対象日" value={chosen} onChange={e=>setChosen(e.target.value)} className="rounded border p-2"><option value="latest">直近の結果日</option><option value="">全期間</option>{dates.map(d=><option key={d} value={d}>{d}</option>)}</select></label>
-   <p className="my-2">同じレース・同じエンジン版の発走前固定予想だけを比較。比較可能{data.comparable}R、順位を付けなかった{data.unranked}Rは対象外。</p>
-   <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr><th>モデル</th><th>1位が勝利</th><th>1位が3着内</th><th>上位5頭に1〜3着全頭</th></tr></thead><tbody>{Object.entries(data.totals).map(([k,t])=><tr key={k} className="border-t"><td className="py-2">{label[k]}</td><td>{pct(t.win,t.n)}</td><td>{pct(t.place,t.n)}</td><td>{pct(t.top5,t.n)}</td></tr>)}</tbody></table></div>
-   <div className="mt-3 rounded border border-indigo-200 p-2"><strong>新しい近走70候補の検証</strong><p className="my-1">候補と現モデルを両方保存した同じ{candidate.comparable}Rだけを比較。結果を見た後の再計算は含めません。</p>{Object.entries(candidate.totals).map(([k,t])=><p key={k}>{label[k]}：1位が勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭で1〜3着全頭 {pct(t.top5,t.n)}</p>)}<p className="mt-1">候補は次の保存から集計します。本命の順位や印は現モデルを使います。</p></div>
-   <p className="mt-2 text-amber-900">これは的中状況の比較です。回収率ではありません。少数の結果だけで重みを変更せず、次の開催でも事前に保存して比較します。</p>
-  </details>
- </section>;
+ return <section className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 text-xs"><details><summary className="font-black text-indigo-950">保存した事前予想でモデルを比較</summary>
+  <div className="mt-2 flex flex-wrap gap-2"><label>対象日 <select aria-label="モデル比較の対象日" value={chosen} onChange={e=>setChosen(e.target.value)}><option value="latest">直近の結果日</option><option value="">全期間</option>{dates.map(d=><option key={d}>{d}</option>)}</select></label>
+  <label>計算版 <select aria-label="比較する計算版" value={buildChosen} onChange={e=>setBuild(e.target.value)}><option value="latest">直近の保存版</option>{builds.map(b=><option key={b} value={b}>{b.startsWith('v12.7')?'v12.7':'旧版'} {b.slice(-8)}</option>)}</select></label>
+  <label>会場 <select aria-label="比較する会場" value={track} onChange={e=>setTrack(e.target.value)}><option value="">全場</option>{[...new Set(records.map(r=>r.track).filter(Boolean))].sort().map(t=><option key={t}>{t}</option>)}</select></label>
+  <label>距離 <select aria-label="比較する距離区分" value={distance} onChange={e=>setDistance(e.target.value)}><option value="">全距離</option><option value="800">800m</option><option value="1400-1500">1400〜1500m</option><option value="2000">2000m</option><option value="other">その他</option></select></label></div>
+  <p className="my-2">同じレース・同じ計算版の発走前固定予想だけを比較。比較可能{data.comparable}R、順位なし{data.unranked}R。旧版は版を選んで確認できます。</p>
+  <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr><th>モデル</th><th>1位が勝利</th><th>1位が3着内</th><th>上位5頭に1〜3着全頭</th></tr></thead><tbody>{Object.entries(data.totals).map(([k,t])=><tr key={k} className="border-t"><td className="py-2">{label[k]}</td><td>{pct(t.win,t.n)}</td><td>{pct(t.place,t.n)}</td><td>{pct(t.top5,t.n)}</td></tr>)}</tbody></table></div>
+  <div className="mt-3 rounded border p-2"><strong>近走85候補の事前検証</strong><p>現行と候補を同時に固定した{candidate.comparable}R。結果後の再計算は含めません。</p>{Object.entries(candidate.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭 {pct(t.top5,t.n)}</p>)}<p>候補は次の新規保存から記録。本命・印は現行を使用し、自動採用しません。候補の補助点は合計±2点、馬体重・人気・騎手・順位学習の上乗せは0です。</p></div>
+  <details className="mt-2"><summary>近走70候補の比較</summary>{Object.entries(balanced.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}</p>)}</details>
+  <p className="mt-2 text-amber-900">的中状況の比較で、回収率ではありません。未見の開催で検証し、少数結果だけで係数を採用しません。</p>
+ </details></section>;
 }

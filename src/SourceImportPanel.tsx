@@ -14,7 +14,7 @@ export default function SourceImportPanel({onApply}:{onApply:(draft:any)=>void})
   <input aria-label="Safari取得ファイル" type="file" multiple accept=".json,.txt,application/json,text/plain" onChange={add} disabled={busy}/>
   {files.map((f,i)=><div key={i} className="mt-1">{f.name} <button onClick={()=>{setFiles(v=>v.filter((_,n)=>n!==i));setDone('');}} className="text-red-600">外す</button></div>)}
   {(error||issue)&&<p role="alert" className="mt-2 text-red-700">{error||issue}</p>}
-  {draft&&<><p className="mt-2 font-bold">{draft.meta.raceDate} {draft.meta.track}{draft.meta.raceNo}R {draft.meta.distance}m · {draft.sources.race.roster.length}頭</p>
+  {draft&&<>{!!draft.detailIssues?.length&&<p className="text-red-800">過去走詳細の不足：{draft.detailIssues.length}頭。反映後に根拠を確認してください。</p>}<p className="mt-2 font-bold">{draft.meta.raceDate} {draft.meta.track}{draft.meta.raceNo}R {draft.meta.distance}m · {draft.sources.race.roster.length}頭</p>
    <p className="mt-1">取得済み：{Object.keys(draft.sources).map(k=>LABEL[k]).join('・')}</p>
    {!!draft.absent.length&&<p className="mt-1 text-amber-800">未取得：{draft.absent.map(k=>LABEL[k]).join('・')}（空欄で取り込みます）</p>}
    {!!draft.errors.length&&<p className="mt-1 text-amber-800">取得時の注意：{draft.errors.join(' / ')}</p>}

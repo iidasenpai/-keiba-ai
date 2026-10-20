@@ -1,3 +1,4 @@
+import {sourceDetailIssues} from './evidenceReview';
 import {eventKey,finite,nonStarter,raceInstant} from './modelSafety';
 const supplemental=['浦和','船橋','大井','川崎','門別'];
 const normalize=(s:any)=>String(s||'').normalize('NFKC').replace(/[\s・･]/g,'');
@@ -26,6 +27,7 @@ export function planDraftUpdate(records:any[],d:any,now=Date.now()){
  const previousTimes=new Map<string,number>();
  for(const h of old.horses)for(const p of h.inputSources||[]){const at=Date.parse(p.capturedAt);if(Number.isFinite(at))previousTimes.set(p.kind,Math.max(previousTimes.get(p.kind)||0,at));}
  if(Object.entries(d.sources).some(([kind,p]:any)=>Date.parse(p.capturedAt)<(previousTimes.get(kind)||0)))return stop('保存予想より古い取得データには戻しません');
+ if(old.horses.some(h=>h.recentPositions?.length)&&sourceDetailIssues(d).length)return stop('過去走詳細が不足する入力には更新しません');
  const key=sourceFingerprint(d);
  if(old.sourceFingerprint===key)return stop('同じ入力で保存済みです');
  if(!old.sourceFingerprint){
@@ -46,6 +48,9 @@ export function inputWarnings(horses:any[],track:string){
  if(undated)warnings.push(`近走指数の日付未確認 ${undated}/${active.length}頭（日数による減衰は未適用）`);
  const bestUndated=active.filter(h=>finite(h.best)!==null&&!h.bestDate).length;
  if(bestUndated)warnings.push(`最高指数の日付未確認 ${bestUndated}/${active.length}頭`);
+ const details=active.filter(h=>(h.recentRuns||[]).some(r=>finite(r.index)!==null)&&!h.recentPositions?.length).length;
+ if(details)warnings.push(`過去走通過順が未取得 ${details}/${active.length}頭`);
+ warnings.push('馬体重・増減は採点対象外');
  if(active.some(h=>finite(h._base)===null))warnings.push('指数不足の馬が含まれます');
  return warnings;
 }

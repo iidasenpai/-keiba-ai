@@ -60,6 +60,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
     A: { version: 'prospective-A-v12', weights: [15,85,0,0], rule: 'v12修正済み補正を共有し基礎重みだけ変更。旧Aとは別集計。', predictions: rows(ordered), diagnostics:modelA.map(h=>({id:h.id,base:h._base,coreWeights:h._coreWeights,context:h._contextComponents,contextScale:h._contextScale,rawScore:h._rawScore,winScore:h._winScore,placeScore:h._placeScore,headAdj:h._headAdj,marketAdj:h._marketAnchorAdj,winAdj:h._winAdj,placeAdj:h._placeAdj,himoAdj:h._himoAdj})) },
     Recent: {version:'recent-only-v12',rule:'保存近走指数のみ・補正なし',predictions:modelRows(current)},
     Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')},
+    ...Object.fromEntries(['Simple85','Simple85Core'].filter(k=>Array.isArray(candidates[k])).map(k=>[k,{version:k==='Simple85'?'simple85-v12.7':'simple85-v12.7-core',weights:[15,85,0,0],rule:k==='Simple85'?'近走85・最高15、調教±1・コメント±0.5・展開±1、合計±2。人気・体重・順位学習補正なし。':'同じ基礎点のみ、補助点なし。',predictions:rows(orderedPrediction(candidates[k])),diagnostics:candidates[k].map(h=>({umaban:h.umaban,...h.candidateEvidence}))}])),
     ...(Array.isArray(candidates.Balanced)?{Balanced:{version:'balanced-v12.6',weights:[15,70,7.5,7.5],rule:'近走70・最高15・距離7.5・コース7.5。現モデルとは別の検証候補。',predictions:rows(orderedPrediction(candidates.Balanced)),diagnostics:candidates.Balanced.map(h=>({umaban:h.umaban,base:h._base,coreWeights:h._coreWeights,score:h._finalScore}))}}:{})
   } };
 }

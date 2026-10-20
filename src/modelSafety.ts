@@ -1,6 +1,7 @@
+import {commentScore} from './assessments';
 // v12: pure scoring, evidence and archive helpers. Historical records are never migrated in place.
-export const MODEL_VERSION = 'nar-safe-v12.2';
-export const MODEL_BUILD = 'v12.2-sha256-06220dcd4ac66d518ed842e537ed6c93f6069e6b57b072cc0a765899860a2ce1';
+export const MODEL_VERSION = 'nar-safe-v12.7';
+export const MODEL_BUILD = 'v12.7-sha256-ff139cfde9ed19d579a2e6058bf2b8da36a03829cbbf19522b287ff07e1d02ee';
 export const ACTIVE_FACTORS = ['training','comment','pace','jockey','body','ground','classFit','gate','pedigree','condition'];
 export const finite = (v:any):number|null => {
   if (v == null || String(v).trim()==='' || /^[-—–未]+$/.test(String(v).trim())) return null;
@@ -49,9 +50,12 @@ export function fieldAudit(horses:any[]) {
   const recent=active.filter(h=>(h._recentMeta?.usableCount??h._recentMeta?.runs?.length??0)>0||finite(h.avg5)!==null).length;
   const core=active.length-unknown.length;
   const total=active.length||1;
-  const score=Math.round(100*(core*.45+recent*.25+dist*.15+course*.15)/total);
-  const issues=[unknown.length?`指数不足 ${unknown.length}頭`:null,unnamed.length?`馬名未照合 ${unnamed.length}頭`:null,dist<active.length?`距離実測 ${dist}/${active.length}`:null,course<active.length?`コース実測 ${course}/${active.length}`:null].filter(Boolean) as string[];
-  return {score,label:unknown.length?'未知馬あり':score>=85?'実測充実':'適性証拠に不足',issues,core,recent,dist,course,unknown:unknown.length,total:active.length,training:active.filter(h=>observed(h,'trainingScore')!==null).length,comments:active.filter(h=>String(h.comment||'').trim()).length};
+  const form=active.filter(h=>Array.isArray(h.recentPositions)&&h.recentPositions.length>0).length;
+  const dated=active.filter(h=>{const rs=(h.recentRuns||[]).filter(r=>finite(r.index)!==null);return rs.length>0&&rs.every(r=>r.date||r.raceDate);}).length;
+  const multiple=active.filter(h=>(h._recentMeta?.usableCount||0)>=3).length;
+  const score=Math.round(100*(core*.35+recent*.20+dist*.10+course*.10+form*.10+dated*.05+multiple*.10)/total);
+  const issues=[form<recent?`通過順 ${form}/${active.length}`:null,dated<recent?'近走日付に未確認あり':null,multiple<recent?'近走3走未満の馬あり':null,unknown.length?`指数不足 ${unknown.length}頭`:null,unnamed.length?`馬名未照合 ${unnamed.length}頭`:null,dist<active.length?`距離実測 ${dist}/${active.length}`:null,course<active.length?`コース実測 ${course}/${active.length}`:null].filter(Boolean) as string[];
+  return {score,label:unknown.length?'未知馬あり':score>=85?'実測充実':'適性証拠に不足',issues,core,recent,dist,course,form,dated,multiple,unknown:unknown.length,total:active.length,training:active.filter(h=>observed(h,'trainingScore')!==null).length,comments:active.filter(h=>String(h.comment||'').trim()).length};
 }
 export function estimatePace(horses:any[]) {
   const profiles=horses.filter(h=>!nonStarter(h)).map(h=>h._styleProfile).filter(p=>p?.evidence>=2);
@@ -77,7 +81,11 @@ export function scoreParts(h:any,recent:number|null,w:any,evidence:any={}) {
   if(evidence.surface&&h.bestSurface&&h.bestSurface!==evidence.surface)values.best=null;
   const bestAt=instant(h.bestDate?`${h.bestDate}T00:00:00+09:00`:null);
   if(bestAt!==null){if(bestAt>=asOf)values.best=null;else weights.best*=Math.pow(.5,(asOf-bestAt)/(86400000*7*Math.max(1,evidence.halfLifeWeeks||16)));}
-  for(const [key,sampleKey] of [['dist','distSamples'],['course','courseSamples']]){const count=finite(h[sampleKey]);if(count!==null&&count>=0)weights[key]*=count/(count+2);}
+  for(const [key,sampleKey] of [['dist','distSamples'],['course','courseSamples']]){
+    const count=finite(h[sampleKey]);if(count!==null&&count>=0)weights[key]*=count/(count+2);
+    const date=h[key+'Date'];const at=instant(date?date+'T00:00:00+09:00':null);
+    if(at!==null){if(at>=asOf)values[key]=null;else weights[key]*=Math.pow(.5,(asOf-at)/(86400000*7*Math.max(1,evidence.halfLifeWeeks||16)));}
+  }
   const parts=Object.entries(values).filter(([k,v])=>v!==null&&Number(weights[k])>0);
   const denominator=parts.reduce((a,[k])=>a+Number(weights[k]),0);
   const base=denominator?parts.reduce((a,[k,v])=>a+Number(v)*Number(weights[k]),0)/denominator:null;
@@ -147,17 +155,7 @@ export function summarizeModels(records:any[]) {
     return {key,...outcomeStats(matched,r=>{const m=r.predictionLock.models[key];return (Array.isArray(m)?m:m.predictions)||[];})};
   })}));
 }
-export function scoreComment(raw:any) {
-  const text=String(raw||'').split(/[。！？\n]/);let score=55;
-  for(const sentence of text){
-    const negative=/様子見|半信半疑|良化途上|状態ひと息|疲れ|まだ.{0,12}ない|期待.{0,4}(?:できない|薄)|順調.{0,4}(?:でない|ではない)/.test(sentence);
-    if(negative){score-=5;continue;}
-    if(/好仕上がり|態勢.{0,3}整|好調|上向|良くなって/.test(sentence))score+=4;
-    if(/ここ目標|巻き返せる|好レース|楽しみ/.test(sentence))score+=3;
-    if(/使いつつ|課題|出遅れ|気ムラ/.test(sentence))score-=3;
-  }
-  return Math.round(bounded(score,35,75));
-}
+export const scoreComment=commentScore;
 export function raceDiagnostics(records:any[]) {
   const groups=new Map<string,any[]>();
   for(const r of records){const key=eventKey(r);if(key)groups.set(key,[...(groups.get(key)||[]),r]);}

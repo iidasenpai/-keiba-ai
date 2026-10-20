@@ -1,3 +1,4 @@
+import {sourceDetailIssues,raceClassFromName} from './evidenceReview';
 // Source files are untrusted input. Validate the complete batch before editing a draft.
 const KINDS=['race','form','standard','recent','training','comment'];
 const TRACKS=['帯広','門別','盛岡','水沢','浦和','船橋','大井','川崎','金沢','笠松','名古屋','園田','姫路','高知','佐賀'];
@@ -26,7 +27,7 @@ export function prepareSources(bundles:any[]) {
   for(const p of b.pages){
    if(!KINDS.includes(p?.kind))throw Error('未対応のデータ種別です');
    const link=urlKind(str(p.url,500));if(link.kind!==p.kind)throw Error('データ種別とURLが一致しません');
-   const m=p.meta;if(m?.surface!==undefined&&!['ダート','芝'].includes(m.surface))throw Error('馬場種別が不正です');if(m){for(const k of ['raceDate','track','raceNo','distance'])str(m[k],30);for(const k of ['raceName','startTime','going'])if(m[k]!==undefined)str(m[k],200);}
+   const m=p.meta;if(m?.surface!==undefined&&!['ダート','芝'].includes(m.surface))throw Error('馬場種別が不正です');if(m){for(const k of ['raceDate','track','raceNo','distance'])str(m[k],30);for(const k of ['raceName','startTime','going','raceClass'])if(m[k]!==undefined)str(m[k],200);}
    if(!m||!/^\d{4}-\d{2}-\d{2}$/.test(m.raceDate)||new Date(m.raceDate+'T00:00:00Z').toISOString().slice(0,10)!==m.raceDate||!TRACKS.includes(m.track)||!/^([1-9]|1[0-2])$/.test(m.raceNo)||!/^\d{3,4}$/.test(m.distance))throw Error('開催情報が不正です');
    if(m.startTime&&!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(m.startTime))throw Error('発走時刻が不正です');
    const day=m.raceDate.replaceAll('-','');if(day.slice(0,4)!==link.id.slice(0,4)||(link.u.hostname==='nar.sp.netkeiba.com'?(link.id.slice(6,10)!==day.slice(4)||Number(link.id.slice(-2))!==Number(m.raceNo)):link.id.slice(-4)!==day.slice(4)))throw Error('開催日・Rと参照元IDが違います');
@@ -39,8 +40,22 @@ export function prepareSources(bundles:any[]) {
     if(['standard','recent'].includes(p.kind)){
      const c=p.rows[i].cells;if(!Array.isArray(c)||c.length!==(p.kind==='standard'?15:12)||c.some(v=>typeof v!=='string'||v.length>200)||c[0]!==h.umaban||tidy(c[2])!==tidy(h.name))throw Error('指数表の列数・馬情報が変わっています');
      const row=p.rows[i];
+     for(const key of ['distDate','courseDate']){const date=row[key]??row.referenceDates?.[key==='distDate'?'distance':'course'];if(date!==undefined&&date!==null&&date!==''&&(!validIndexDate(date)||date>=m.raceDate))throw Error('適性指数の日付が不正です');}
      if(row.bestDate!==undefined&&row.bestDate!==''&&(!validIndexDate(row.bestDate)||row.bestDate>=m.raceDate))throw Error('最高指数の日付が不正です');
      if(row.runDates!==undefined&&(!Array.isArray(row.runDates)||row.runDates.length!==5||row.runDates.some((d:any)=>d!==null&&d!==''&&(!validIndexDate(d)||d>=m.raceDate))))throw Error('近5走の日付が不正です');
+    }
+    if(p.kind==='form'){
+     const row=p.rows[i];if(row.historyStatus!==undefined&&!['available','unavailable','no-history'].includes(row.historyStatus))throw Error('詳細の取得状態が不正です');
+     if(row.historyReason!==undefined)str(row.historyReason,200);
+     if(row.layoffWeeks!==undefined&&row.layoffWeeks!==null&&(!Number.isFinite(row.layoffWeeks)||row.layoffWeeks<0||row.layoffWeeks>260))throw Error('休養週数が不正です');
+     if(row.courseRecord!==undefined&&row.courseRecord!==null&&['win','second','third','other'].some(k=>!Number.isInteger(row.courseRecord[k])||row.courseRecord[k]<0||row.courseRecord[k]>1000))throw Error('コース成績が不正です');
+     if(row.pastRuns!==undefined){if(!Array.isArray(row.pastRuns)||row.pastRuns.length>5)throw Error('過去走詳細は5走以内です');
+      for(const run of row.pastRuns){
+       if(typeof run.track!=='string'||run.track.length>20||!['ダート','芝'].includes(run.surface)||!Number.isInteger(run.distance)||run.distance<100||run.distance>5000||!Number.isInteger(run.fieldSize)||run.fieldSize<1||run.fieldSize>24||!Array.isArray(run.positions)||run.positions.length>4||run.positions.some(v=>v!==null&&(!Number.isInteger(v)||v<1||v>run.fieldSize)))throw Error('通過順・距離・頭数の形式が不正です');
+       if(run.date&&(!validIndexDate(run.date)||run.date>=m.raceDate))throw Error('過去走詳細の日付が不正です');
+       if(run.raceClass!==undefined)str(run.raceClass,100);if(run.weight!==undefined&&run.weight!==''&&(typeof run.weight!=='number'||run.weight<20||run.weight>80))throw Error('過去走斤量が不正です');
+      }
+     }
     }
    }
    if(sources[p.kind])throw Error(`${p.kind}が重複しています。古いファイルを外してください`);
@@ -55,12 +70,13 @@ export function prepareSources(bundles:any[]) {
   if(p.roster.length!==base.roster.length||p.roster.some(h=>byNo.get(h.umaban)!==tidy(h.name)))throw Error(p.kind+'の馬番・馬名が出馬表と一致しません');
  }
  const absent=KINDS.filter(k=>!sources[k]);
- return {sources,meta:base.meta,sourceRaceId:new URL(base.url).searchParams.get('race_id'),errors,absent};
+ const detailIssues=sourceDetailIssues({sources,meta:base.meta});
+ return {sources,meta:{...base.meta,raceClass:base.meta.raceClass||raceClassFromName(base.meta.raceName)},detailIssues,sourceRaceId:new URL(base.url).searchParams.get('race_id'),errors,absent};
 }
 // Preserve five slots, including non-starters. The adjacent annual best is cells[3].
 export function indexFields(row:any,recent=false){
  const c=row.cells,number=(v:any)=>/^-?\d+(?:\.\d+)?\*?$/.test(String(v))?String(v).replace('*',''):'';
- if(!recent)return {...Object.fromEntries(['best','avg5','dist','course','r3','r2','r1'].map((k,i)=>[k,number(c[i+3])])),...(validIndexDate(row.bestDate)&&number(c[3])!==''?{bestDate:row.bestDate}:{})};
+ if(!recent)return {...Object.fromEntries(['best','avg5','dist','course','r3','r2','r1'].map((k,i)=>[k,number(c[i+3])])),...(validIndexDate(row.bestDate)&&number(c[3])!==''?{bestDate:row.bestDate}:{}),...Object.fromEntries([['distDate',row.distDate??row.referenceDates?.distance],['courseDate',row.courseDate??row.referenceDates?.course]].filter(([,v])=>validIndexDate(v)))};
  const oldToNew=c.slice(4,9).map((v:string,i:number)=>{
   const m=v.replace(/\s+/g,' ').match(/^(.+?)(ダ|芝)(\d{3,4})\s+([SMH])\s+(-?\d+(?:\.\d+)?)\s*\(([-+]?\d+(?:\.\d+)?)\)$/);
   return m?{track:m[1],surface:m[2]==='芝'?'芝':'ダート',distance:Number(m[3]),pace:m[4],index:Number(m[5]),adjustment:Number(m[6]),source:['東京','中山','京都','阪神','中京','新潟','福島','小倉','札幌','函館'].includes(m[1])?'JRA':'NAR',...(validIndexDate(row.runDates?.[i])?{date:row.runDates[i]}:{})}:{index:null,missing:true};

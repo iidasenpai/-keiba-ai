@@ -1,4 +1,6 @@
 import {trainingAssessment} from './assessments';
+import {conditionCandidate} from './conditionCandidate';
+import ConditionEvidencePanel from './ConditionEvidencePanel';
 import {structuredFormFields,sourceDetailIssues,raceClassFromName,uncertainty,simple85} from './evidenceReview';
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { SNAPSHOT_KEY } from "./storage";
@@ -2771,11 +2773,12 @@ export default function NARPredictionTool() {
       return { ...h, _rankWinRate:h._winRate, _rankPlaceRate:h._placeRate, _winRate:reference?.win??0, _placeRate:reference?.place??0, _probabilityLabel:'未校正のモデル参考率', _unknownAbility:h._base===null&&!nonStarter(h), _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
     };
-    return { current: calculate(computed), A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false) };
+    return { current: calculate(computed), A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
   }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn,raceDate,scheduledStart,distance,surface,raceClass,track]);
 
   const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
   const ranked = activeLockedRace && sameField(activeLockedRace,{track,distance,raceNo,horses,raceDate,sourceRaceId}) ? predictionView(activeLockedRace).horses : modelRanked.current;
+  const displayedLock = activeLockedRace && sameField(activeLockedRace,{track,distance,raceNo,horses,raceDate,sourceRaceId}) ? activeLockedRace.predictionLock : null;
 
   // ---- 新旧モデル並行検証（実験版 / 保存データは読み取り専用） ----
   // 現存保存値による近似比較。事前固定A/B比較とは別集計。
@@ -3272,7 +3275,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.7', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core});
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.8', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3521,7 +3524,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.7</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.8・浦和候補検証</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>
@@ -3958,17 +3961,20 @@ export default function NARPredictionTool() {
 
       <div className="mx-3 mt-3 grid gap-3 md:grid-cols-2">
         <div className="rounded-xl border border-sky-200 bg-white p-3 shadow-sm">
-          <div className="flex items-center justify-between"><div className="font-black text-sky-900">🛡️ 予想の検証状況</div><div className="text-2xl font-black text-sky-700">{confidence.grade} <span className="text-sm">{confidence.score}/100 指数の入力充足</span></div></div>
+          <div className="flex items-center justify-between"><div className="font-black text-sky-900">🛡️ 予想の検証状況</div><div className="text-xl font-black text-sky-700">{confidence.grade}</div></div>
+          <details className="mt-2 text-xs"><summary>入力項目の充足状況（予想の信頼度ではありません）</summary><p>{confidence.score}/100。距離・転入・休養などの比較条件は別途確認してください。</p></details>
           <div className="mt-2 text-[11px] text-gray-600">{confidence.reasons.join("・")}</div>
           <p className="mt-2 text-xs font-bold text-amber-900">点差の大きさは、勝つ確率や利益を保証しません。</p>
           {inputWarnings(ranked,track).length>0&&<p role="status" className="mt-2 rounded bg-amber-100 p-2 text-xs text-amber-950">未確認の入力：{inputWarnings(ranked,track).join(' / ')}。入力充足点とは別に確認してください。</p>}
         </div>
         <div className="rounded-xl border border-emerald-200 bg-white p-3 shadow-sm">
-          <div className="flex items-center justify-between"><div className="font-black text-emerald-900">✅ 実測データ充足</div><div className="text-xl font-black text-emerald-700">{dataQuality.score}/100</div></div>
-          <div className="mt-1 text-xs font-bold">{dataQuality.label}</div><div className="mt-1 text-[10px] text-gray-500">{dataQuality.issues.length?dataQuality.issues.join("・"):"入力された項目を確認済み"}</div>
+          <div className="font-black text-emerald-900">入力項目の確認</div>
+          <div className="mt-1 text-xs">指数入力 {dataQuality.core}/{dataQuality.total}頭・近走3走以上 {dataQuality.multiple}/{dataQuality.total}頭</div><div className="mt-1 text-[10px] text-gray-500">{dataQuality.issues.length?dataQuality.issues.join("・"):"入力された項目を確認済み"}</div>
+          <p className="mt-2 text-xs">項目が埋まっていても、今回と条件が違う実績は比較材料として不確かです。</p>
         </div>
       </div>
 
+      <ConditionEvidencePanel horses={ranked} meta={{track,distance,surface,raceDate,scheduledStart}} models={displayedLock?.models||modelRanked} locked={!!displayedLock}/>
       <div className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 shadow-sm">
         <div className="flex flex-wrap gap-2 border-b pb-2">
           <button onClick={()=>setAnalysisTab("review")} className={`rounded px-3 py-1.5 text-xs font-black ${analysisTab==='review'?'bg-indigo-700 text-white':'bg-gray-100'}`}>AI自動回顧</button>

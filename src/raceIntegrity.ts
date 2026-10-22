@@ -52,6 +52,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
   if (current.some(h => number(h.finish) !== null || number(h.actualFinish)!==null)) throw new Error('着順入力済みの予測は事前固定できません');
   if(current.some(h=>!String(h.name||'').trim()))throw new Error('馬名が未照合です。出馬表を確認してください');
   if(current.some(h=>!h.id||!Number.isInteger(number(h.umaban))||Number(h.umaban)<1)||new Set(current.map(h=>String(h.id))).size!==current.length||new Set(current.map(h=>String(h.umaban))).size!==current.length)throw new Error('出走馬ID・馬番が重複または不正です');
+  if (!metadata.track && ['UrawaCondition','UrawaConditionAux'].some(k=>Array.isArray(candidates[k])&&candidates[k].length)) throw new Error('比較候補の保存に競馬場情報が必要です');
   const start=instant(metadata.scheduledStart);
   if(start!==null&&(instant(now) as number)>=start)throw new Error('発走後の予測は事前固定できません');
   const ordered = orderedPrediction(modelA.map(h => ({ ...h, predictedScore: h._finalScore })));

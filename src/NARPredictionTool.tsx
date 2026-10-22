@@ -3275,7 +3275,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.8.1', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.8.2', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3524,7 +3524,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.8.1・浦和候補検証</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.8.2・浦和候補検証</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>

@@ -20,6 +20,7 @@ export default function BatchImportPanel({inbox,onImport,onOpen,onRun,ready,summ
   {batch&&<>
    <p className="mt-2 font-bold">{batch.raceDate} 対象{batch.expectedTotal}レース · 取得済み{batch.drafts.length} · 取得失敗{batch.errors.length}</p>
    <p className="mt-1 text-gray-600">全頭・開催情報の照合済み。未取得項目は各レースに表示します。</p>
+   {batch.drafts.some(d=>d.sources.training?.representation==='structured-workouts-v1')&&<p className="mt-1 font-bold text-orange-800">専門紙の調教を取得済み。該当レースは従来予想と調教補正候補を同時保存します。主予想の印は従来どおりです。</p>}
    <p className="mt-1 text-amber-800">新規保存は発走前の未保存レースが対象です。補完版を読み込んだら「保存済み予想を更新」を使います。結果登録済み・発走後は変更しません。</p>
    <label className="my-2 block text-amber-900"><input type="checkbox" checked={allowIncomplete} onChange={e=>setAllowIncomplete(e.target.checked)}/> 対象場の調教・厩舎コメントが未取得でも保存する</label>
    <label className="my-2 block text-red-900"><input type="checkbox" checked={allowIncompleteDetails} onChange={e=>setAllowIncompleteDetails(e.target.checked)}/> 過去走詳細の不足を確認して暫定保存する</label>

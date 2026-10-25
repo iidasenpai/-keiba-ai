@@ -1,3 +1,4 @@
+import {validateStructuredTraining} from './structuredTraining';
 import {sourceDetailIssues,raceClassFromName} from './evidenceReview';
 // Source files are untrusted input. Validate the complete batch before editing a draft.
 const KINDS=['race','form','standard','recent','training','comment'];
@@ -7,6 +8,13 @@ const str=(x:any,max=500000)=>{if(typeof x!=='string'||x.length>max)throw Error(
 const validIndexDate=(x:any)=>typeof x==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(x)&&Number.isFinite(Date.parse(x+'T00:00:00Z'))&&new Date(x+'T00:00:00Z').toISOString().slice(0,10)===x;
 function urlKind(url:string){
  const u=new URL(url);if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)throw Error('参照URLが不正です');
+ const pdf=u.pathname.match(/^\/PDF\/(\d{4})\/(\d{2})\/(\d{2})\/(h(\d{2})|(\d{8})_v(\d{2}))\.pdf$/);
+ if(pdf&&['uma-katsu.net','www.kanazawakeiba-yoso.com'].includes(u.hostname)){
+  if(u.search)throw Error('調教PDFの参照URLが不正です');
+  const saga=u.hostname==='uma-katsu.net';
+  if(saga?!pdf[5]:!pdf[7]||pdf[6]!==pdf[1]+pdf[2]+pdf[3])throw Error('調教PDFの参照元・日付が不正です');
+  return {u,id:'',kind:'training',trainingDate:pdf[1]+'-'+pdf[2]+'-'+pdf[3],trainingRaceNo:String(Number(saga?pdf[5]:pdf[7])),trainingTrack:saga?'佐賀':'金沢'};
+ }
  if(u.hostname==='nar.sp.netkeiba.com'){
   const id=u.searchParams.get('race_id');if(!/^\d{12}$/.test(id||''))throw Error('netkeibaレースIDが不正です');
   const kind=u.pathname==='/race/shutuba.html'?'race':u.pathname==='/race/newspaper.html'?'form':u.pathname==='/race/speed.html'?(u.searchParams.get('mode')==='past'?'recent':'standard'):'';
@@ -30,7 +38,7 @@ export function prepareSources(bundles:any[]) {
    const m=p.meta;if(m?.surface!==undefined&&!['ダート','芝'].includes(m.surface))throw Error('馬場種別が不正です');if(m){for(const k of ['raceDate','track','raceNo','distance'])str(m[k],30);for(const k of ['raceName','startTime','going','raceClass'])if(m[k]!==undefined)str(m[k],200);}
    if(!m||!/^\d{4}-\d{2}-\d{2}$/.test(m.raceDate)||new Date(m.raceDate+'T00:00:00Z').toISOString().slice(0,10)!==m.raceDate||!TRACKS.includes(m.track)||!/^([1-9]|1[0-2])$/.test(m.raceNo)||!/^\d{3,4}$/.test(m.distance))throw Error('開催情報が不正です');
    if(m.startTime&&!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(m.startTime))throw Error('発走時刻が不正です');
-   const day=m.raceDate.replaceAll('-','');if(day.slice(0,4)!==link.id.slice(0,4)||(link.u.hostname==='nar.sp.netkeiba.com'?(link.id.slice(6,10)!==day.slice(4)||Number(link.id.slice(-2))!==Number(m.raceNo)):link.id.slice(-4)!==day.slice(4)))throw Error('開催日・Rと参照元IDが違います');
+   const day=m.raceDate.replaceAll('-','');if('trainingDate' in link){if(link.trainingDate!==m.raceDate||link.trainingRaceNo!==m.raceNo||link.trainingTrack!==m.track)throw Error('調教PDFの開催日・会場・Rが一致しません');}else if(day.slice(0,4)!==link.id.slice(0,4)||(link.u.hostname==='nar.sp.netkeiba.com'?(link.id.slice(6,10)!==day.slice(4)||Number(link.id.slice(-2))!==Number(m.raceNo)):link.id.slice(-4)!==day.slice(4)))throw Error('開催日・Rと参照元IDが違います');
    if(!Number.isFinite(Date.parse(p.capturedAt))||Date.parse(p.capturedAt)>Date.now()+300000)throw Error('取得日時が不正です');
    str(p.text);if(p.paceText!==undefined)str(p.paceText);str(p.capturedAt,40);if(!Array.isArray(p.roster)||p.roster.length<1||p.roster.length>18||!Array.isArray(p.rows)||p.rows.length!==p.roster.length)throw Error('出走馬一覧が不正です');
    const nos=new Set();for(const [i,h] of p.roster.entries()){
@@ -69,6 +77,8 @@ export function prepareSources(bundles:any[]) {
   if(p.meta.startTime&&base.meta.startTime&&p.meta.startTime!==base.meta.startTime)throw Error('発走時刻が一致しません');
   if(p.roster.length!==base.roster.length||p.roster.some(h=>byNo.get(h.umaban)!==tidy(h.name)))throw Error(p.kind+'の馬番・馬名が出馬表と一致しません');
  }
+ if(sources.training?.representation==='structured-workouts-v1')validateStructuredTraining(sources.training,sources.form);
+ if(sources.training&&['uma-katsu.net','www.kanazawakeiba-yoso.com'].includes(new URL(sources.training.url).hostname)&&sources.training.representation!=='structured-workouts-v1')throw Error('調教PDFは構造化記録として取り込んでください');
  const absent=KINDS.filter(k=>!sources[k]);
  const detailIssues=sourceDetailIssues({sources,meta:base.meta});
  return {sources,meta:{...base.meta,raceClass:base.meta.raceClass||raceClassFromName(base.meta.raceName)},detailIssues,sourceRaceId:new URL(base.url).searchParams.get('race_id'),errors,absent};

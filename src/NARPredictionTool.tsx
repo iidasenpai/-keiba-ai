@@ -1,3 +1,5 @@
+import {structuredTrainingFields,trainingCandidateInputs} from './structuredTraining';
+import TrainingEvidencePanel from './TrainingEvidencePanel';
 import {trainingAssessment} from './assessments';
 import {conditionCandidate} from './conditionCandidate';
 import ConditionEvidencePanel from './ConditionEvidencePanel';
@@ -2773,8 +2775,9 @@ export default function NARPredictionTool() {
       return { ...h, _rankWinRate:h._winRate, _rankPlaceRate:h._placeRate, _winRate:reference?.win??0, _placeRate:reference?.place??0, _probabilityLabel:'未校正のモデル参考率', _unknownAbility:h._base===null&&!nonStarter(h), _finalScore:h._himoScore, _rank: idx !== undefined ? idx + 1 : null, _autoMark: autoMark };
     });
     };
-    return { current: calculate(computed), A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
-  }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn,raceDate,scheduledStart,distance,surface,raceClass,track]);
+    const trainingInputs=trainingCandidateInputs(computed,{raceDate,raceNo,track});
+    return { Training:trainingInputs?calculate(trainingInputs):null, current: calculate(computed), A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
+  }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn,raceDate,raceNo,scheduledStart,distance,surface,raceClass,track]);
 
   const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
   const ranked = activeLockedRace && sameField(activeLockedRace,{track,distance,raceNo,horses,raceDate,sourceRaceId}) ? predictionView(activeLockedRace).horses : modelRanked.current;
@@ -3275,7 +3278,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.8.2', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.8.3', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {Training:modelRanked.Training,Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];
@@ -3440,14 +3443,15 @@ export default function NARPredictionTool() {
     if(sources.standard)next=next.map(h=>({...h,...indexFields(sources.standard.rows.find(r=>r.umaban===h.umaban))}));
     if(sources.recent)next=next.map(h=>({...h,...indexFields(sources.recent.rows.find(r=>r.umaban===h.umaban),true)}));
     if(sources.form){next=parseFormText(sources.form.text,next,inputContext);next=next.map(h=>({...h,...structuredFormFields(sources.form.rows.find(r=>r.umaban===h.umaban),meta)}));}
-    if(sources.training)next=parseTrainingText(sources.training.text,next,inputContext);
+    if(sources.training?.representation==='structured-workouts-v1'){const fields=structuredTrainingFields(sources.training,sources.form);next=next.map(h=>({...h,...fields.get(h.umaban)}));}
+    else if(sources.training)next=parseTrainingText(sources.training.text,next,inputContext);
     if(sources.comment)next=parseCommentText(sources.comment.text,next,inputContext);
     // Source timestamps remain input provenance, never a pre-race prediction timestamp.
     next=next.map(h=>({...h,inputSources:Object.values(sources).map((p:any)=>({kind:p.kind,url:p.url,capturedAt:p.capturedAt})),finish:'',actualFinish:null}));
     setActiveSavedRaceId(null);setResultEntryMode(false);setResultOrderInput('');setRevisionOf(null);
     setRaceDate(meta.raceDate);setStartTime(meta.startTime||'');setTrack(meta.track);setDistance(meta.distance);setSurface(inputContext.surface);setRaceNo(meta.raceNo);setRaceName(meta.raceName||'');setRaceClass(inputContext.raceClass);
     const goingMap={'稍':'稍重','不':'不良'};setGoing(goingMap[meta.going]||(['良','稍重','重','不良'].includes(meta.going)?meta.going:'未確認'));
-    setSourceName(sources.training||sources.comment?'netkeiba / 競馬ブック':'netkeiba');setSourceRaceId(draft.sourceRaceId);
+    setSourceName(sources.training?.representation==='structured-workouts-v1'?'netkeiba / 地方専門紙':sources.training||sources.comment?'netkeiba / 競馬ブック':'netkeiba');setSourceRaceId(draft.sourceRaceId);
     const providerPace=sources.race.paceText?.match(/ペース\s*([SMH])/);setPaceType(providerPace?.[1]||'AUTO');
     const texts={race:sources.race.text,standard:sources.standard?.text||'',recent:sources.recent?.text||'',form:sources.form?.text||'',pace:sources.race.paceText||'',training:sources.training?.text||'',comment:sources.comment?.text||''};
     // Keep provider text and collection timestamps with the imported draft.
@@ -3524,7 +3528,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.8.2・浦和候補検証</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.8.3・調教比較対応</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>
@@ -3974,6 +3978,7 @@ export default function NARPredictionTool() {
         </div>
       </div>
 
+      <TrainingEvidencePanel horses={ranked} model={displayedLock?.models?.Training||(!displayedLock?modelRanked.Training:null)} locked={!!displayedLock} />
       <ConditionEvidencePanel horses={ranked} meta={{track,distance,surface,raceDate,scheduledStart}} models={displayedLock?.models||modelRanked} locked={!!displayedLock}/>
       <div className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 shadow-sm">
         <div className="flex flex-wrap gap-2 border-b pb-2">

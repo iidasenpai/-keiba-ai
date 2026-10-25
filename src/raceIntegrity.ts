@@ -1,3 +1,4 @@
+import {TRAINING_CANDIDATE_VERSION} from './structuredTraining';
 // Storage and historical predictions are kept separate from live recalculation.
 import { finite, MODEL_VERSION, MODEL_BUILD, modelRows, instant, nonStarter, validateFullResults } from './modelSafety';
 import {CONDITION_VERSION} from './conditionCandidate';
@@ -64,6 +65,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
     Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')},
     ...Object.fromEntries(['Simple85','Simple85Core'].filter(k=>Array.isArray(candidates[k])).map(k=>[k,{version:k==='Simple85'?'simple85-v12.7':'simple85-v12.7-core',weights:[15,85,0,0],rule:k==='Simple85'?'近走85・最高15、調教±1・コメント±0.5・展開±1、合計±2。人気・体重・順位学習補正なし。':'同じ基礎点のみ、補助点なし。',predictions:rows(orderedPrediction(candidates[k])),diagnostics:candidates[k].map(h=>({umaban:h.umaban,...h.candidateEvidence}))}])),
     ...Object.fromEntries(['UrawaCondition','UrawaConditionAux'].filter(k=>metadata.track==='浦和'&&Array.isArray(candidates[k])).map(k=>[k,{version:CONDITION_VERSION+(k.endsWith('Aux')?'-aux':''),rule:'同馬場・同距離帯・距離±200mの地方近走のみ。近走85・条件内最高15を証拠量で出走馬の中央値へ縮小。補助候補のみ調教±1・コメント±0.5。',predictions:rows(orderedPrediction(candidates[k]).filter(h=>finite(h._finalScore)!==null)),diagnostics:candidates[k].map(h=>({umaban:h.umaban,...h.candidateEvidence}))}])),
+    ...(Array.isArray(candidates.Training)?{Training:{version:TRAINING_CANDIDATE_VERSION,rule:'現行の基礎・既存補正を維持し、構造化調教の候補補正のみ追加。今回の時計に紐づく短評分類±0.35、条件一致の時計比較は4頭以上で±0.25以内、合計±0.6。未取得・時計なし・前走以前・区間不明は時計補正0。未採用。',predictions:rows(orderedPrediction(candidates.Training)),diagnostics:candidates.Training.map(h=>({umaban:h.umaban,...h.trainingCandidateEvidence}))}}:{}),
     ...(Array.isArray(candidates.Balanced)?{Balanced:{version:'balanced-v12.6',weights:[15,70,7.5,7.5],rule:'近走70・最高15・距離7.5・コース7.5。現モデルとは別の検証候補。',predictions:rows(orderedPrediction(candidates.Balanced)),diagnostics:candidates.Balanced.map(h=>({umaban:h.umaban,base:h._base,coreWeights:h._coreWeights,score:h._finalScore}))}}:{})
   } };
 }

@@ -3,13 +3,6 @@ import {applyResult,resultIssues} from './raceIntegrity';
 const tracks=['帯広','門別','盛岡','水沢','浦和','船橋','大井','川崎','金沢','笠松','名古屋','園田','姫路','高知','佐賀'];
 const name=(v:any)=>String(v||'').normalize('NFKC').replace(/[\s・･]/g,'');
 export const resultSignature=(rows:any[])=>JSON.stringify([...rows].sort((a,b)=>Number(a.umaban)-Number(b.umaban)).map(r=>[String(r.umaban),name(r.name),finite(r.finish),String(r.raceStatus||'')]));
-export function winPayout(payouts:any,rows:any[]){
- const p=payouts?.['単勝'];if(!p)return null;
- const amount=typeof p.amount==='number'?p.amount:/^\s*[\d,]+\s*(?:円)?\s*$/.test(String(p.amount))?finite(String(p.amount).replace(/[,円\s]/g,'')):null;
- const winner=rows.find(h=>Number(h.finish)===1);
- if(!winner||String(p.numbers)!==String(winner.umaban)||amount===null||!Number.isInteger(amount)||amount<100||amount>10000000)return null;
- return {umaban:String(winner.umaban),amount};
-}
 export function prepareResultBatch(raw:any,now=Date.now()){
  if(raw?.format!=='nar-result-batch'||raw.version!==1||!Array.isArray(raw.races)||raw.races.length>100||!Array.isArray(raw.errors)||raw.errors.length>100)throw Error('結果ファイルの形式が違います');
  if(typeof raw.raceDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(raw.raceDate)||new Date(raw.raceDate+'T00:00:00Z').toISOString().slice(0,10)!==raw.raceDate)throw Error('開催日が不正です');
@@ -28,7 +21,7 @@ export function prepareResultBatch(raw:any,now=Date.now()){
   const nums=new Set(),top=new Set();
   for(const h of rows){if(nums.has(h.umaban))throw Error('馬番が重複しています');nums.add(h.umaban);if(h.finish!==null){if(!Number.isInteger(h.finish)||h.finish<1||h.finish>rows.length||h.raceStatus)throw Error('着順・出走状態が不正です');if(h.finish<=3){if(top.has(h.finish))throw Error('1〜3着の同着は手動照合が必要です');top.add(h.finish);}}}
   if(top.size!==3)throw Error('1〜3着を揃えてください');
-  return {key,raceDate:r.raceDate,track:r.track,raceNo:r.raceNo,distance:r.distance,startTime:r.startTime,sourceRaceId:r.sourceRaceId,url:r.url,fetchedAt:r.fetchedAt,rows,payout:winPayout(r.payouts,rows),signature:resultSignature(rows)};
+  return {key,raceDate:r.raceDate,track:r.track,raceNo:r.raceNo,distance:r.distance,startTime:r.startTime,sourceRaceId:r.sourceRaceId,url:r.url,fetchedAt:r.fetchedAt,rows,signature:resultSignature(rows)};
  });
  const errors=raw.errors.map(r=>{const key=identify(r);if(typeof r.message!=='string'||!r.message.trim()||r.message.length>500)throw Error('未確定レースの説明が不正です');return {key,track:r.track,raceNo:r.raceNo,message:r.message};});
  return {raceDate:raw.raceDate,expectedTotal:raw.expectedTotal,races,errors};
@@ -48,13 +41,12 @@ export function planResultImport(records:any[],batch:any,now=new Date().toISOStr
    if(record.status==='completed'){
     if(record.resultOrder!==order.join('-'))throw Error('保存済み結果と異なります。自動で修正しません');
     if(record.horses.some(h=>finite(h.finish)!==null&&finite(h.finish)!==result.rows.find(x=>x.umaban===String(h.umaban)).finish))throw Error('既存の着順と異なります。手動照合が必要です');
-    if(record.resultImport?.signature===result.signature&&(!result.payout||JSON.stringify(record.resultPayout&&{umaban:record.resultPayout.umaban,amount:record.resultPayout.amount})===JSON.stringify(result.payout))){skipped.push({label,id:record.id,reason:'反映済み（変更なし）'});continue;}
+    if(record.resultImport?.signature===result.signature){skipped.push({label,id:record.id,reason:'反映済み（変更なし）'});continue;}
    }
    const updated=applyResult(record,record,order,now);
    updated.horses=updated.horses.map(h=>{const actual=result.rows.find(x=>x.umaban===String(h.umaban));return {...h,finish:actual.finish===null?'':String(actual.finish),actualFinish:actual.finish,raceStatus:actual.raceStatus};});
    updated.review=null;
    updated.resultImport={signature:result.signature,url:result.url,fetchedAt:result.fetchedAt,importedAt:now};
-   if(result.payout)updated.resultPayout={...result.payout,url:result.url,fetchedAt:result.fetchedAt,importedAt:now};
    updated.resultVerification={at:now,evidence:result.url,identityVerified:true};
    if(resultIssues(updated).length)throw Error(resultIssues(updated).join(' / '));
    actions.push({label,id:record.id,updated});

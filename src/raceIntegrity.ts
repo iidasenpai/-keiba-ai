@@ -1,3 +1,4 @@
+import {OI_MODEL_BUILD,OI_MODEL_VERSION} from './oiModel';
 import {TRAINING_CANDIDATE_VERSION} from './structuredTraining';
 // Storage and historical predictions are kept separate from live recalculation.
 import { finite, MODEL_VERSION, MODEL_BUILD, modelRows, instant, nonStarter, validateFullResults } from './modelSafety';
@@ -58,8 +59,10 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
   if(start!==null&&(instant(now) as number)>=start)throw new Error('発走後の予測は事前固定できません');
   const ordered = orderedPrediction(modelA.map(h => ({ ...h, predictedScore: h._finalScore })));
   const rows = (hs: any[]) => hs.map((h,i) => ({ id: h.id, umaban: h.umaban, rank: i+1, score: h._finalScore }));
-  return { ...clone(metadata), schemaVersion: 2, lockedAt: now, modelVersion: MODEL_VERSION, build:MODEL_BUILD, horses: clone(current), models: {
+  return { ...clone(metadata), schemaVersion: 2, lockedAt: now, modelVersion: MODEL_VERSION, build:metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?OI_MODEL_BUILD:MODEL_BUILD, horses: clone(current), models: {
     current: rows(orderedPrediction(current)),
+    ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?{OiModel:{version:OI_MODEL_VERSION,predictions:rows(orderedPrediction(current)),diagnostics:current.map(h=>({umaban:h.umaban,...h.oiEvidence}))}}:{}),
+    ...(metadata.track==='大井'&&Array.isArray(candidates.OiBaseline)?{OiBaseline:{version:'oi-baseline-v1',rule:'同時保存した共通入力の従来計算。専用版と同じ学習履歴の範囲を参照。',predictions:rows(orderedPrediction(candidates.OiBaseline))}}:{}),
     A: { version: 'prospective-A-v12', weights: [15,85,0,0], rule: 'v12修正済み補正を共有し基礎重みだけ変更。旧Aとは別集計。', predictions: rows(ordered), diagnostics:modelA.map(h=>({id:h.id,base:h._base,coreWeights:h._coreWeights,context:h._contextComponents,contextScale:h._contextScale,rawScore:h._rawScore,winScore:h._winScore,placeScore:h._placeScore,headAdj:h._headAdj,marketAdj:h._marketAnchorAdj,winAdj:h._winAdj,placeAdj:h._placeAdj,himoAdj:h._himoAdj})) },
     Recent: {version:'recent-only-v12',rule:'保存近走指数のみ・補正なし',predictions:modelRows(current)},
     Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')},

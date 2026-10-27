@@ -20,6 +20,10 @@ declare global {
 
 window.storage = storage;
 
+// iPhone Safari等はしばらく使わないとサイトデータを削除することがある。永続化を要求して消失リスクを下げる。
+// 許可されるかはブラウザ次第（失敗しても動作に影響なし）。
+try { void navigator.storage?.persist?.(); } catch { /* ignore */ }
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <NARPredictionTool />

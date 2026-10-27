@@ -296,7 +296,8 @@ export default function NARPredictionTool() {
           }
         } else {
           // First launch on a new origin (e.g. GitHub Pages): restore the bundled
-          // 38-race backup without ever overwriting races already stored there.
+          // seed backup (public/NAR-seed.json) without ever overwriting races already stored there.
+          // The shipped seed is currently empty, so this is a no-op until real data is placed there.
           try {
             const backupUrl = new URL("NAR-seed.json", document.baseURI).toString();
             const res = await fetch(backupUrl, { cache: "no-store" });
@@ -1903,7 +1904,11 @@ export default function NARPredictionTool() {
       const image = await fileToCompressedDataUrl(file);
       const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // サーバー側に ANALYZE_TOKEN を設定した場合のみ必要。端末のlocalStorageに 'nar-analyze-token' を保存しておく。
+          ...(() => { try { const t = localStorage.getItem("nar-analyze-token"); return t ? { "x-analyze-token": t } : {}; } catch { return {}; } })(),
+        },
         body: JSON.stringify({ image, type }),
       });
       const payload = await response.json().catch(() => ({}));

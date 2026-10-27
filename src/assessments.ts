@@ -8,7 +8,7 @@ export function commentAssessment(raw:any){
  for(const sentence of sentences){
   const text=sentence.replace(harmless,'');
   const negated=/(?:好調|順調|上向|良化|好仕上がり|仕上がり良|期待|楽しみ).{0,10}(?:ではない|でない|ではなく|していない|いていない|とはいえない|とは言えない|できない|出来ない|薄い|乏しい)/.test(text);
-  const concern=/様子見|半信半疑|良化途上|状態ひと息|疲れ|本調子.{0,8}(?:ない|届か|至ら)|余裕残り|重め|叩(?:き|いた).{0,8}(?:必要|から|良)|使ってから|慎重|割引|期待薄|まだ.{0,12}ない/.test(text);
+  const concern=/様子見|半信半疑|良化途上|状態ひと息|疲れ|本調子.{0,8}(?:ない|届か|至ら)|余裕残り|重め|叩(?:き|いた).{0,8}(?:必要|から)|使ってから|慎重|割引|期待薄|まだ.{0,12}ない/.test(text);
   if(negated||concern){score-=5;negative.push(sentence);continue;}
   if(/できれば|運べれば|決まれば|次第|なら|課題|どうか|未知/.test(text))conditional.push(sentence);
   if(/好仕上がり|態勢.{0,3}整|好調|上向|良くなって|状態改善|状態充実/.test(text)){score+=4;positive.push(sentence);}

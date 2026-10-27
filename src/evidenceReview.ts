@@ -24,6 +24,7 @@ export function sourceDetailIssues(d:any){
 }
 export function structuredFormFields(row:any,meta:any){
  const out:any={};if(!row)return out;
+ if(Array.isArray(row.pastRuns))out.pastRunEvidence=row.pastRuns.map((r:any)=>({...r}));
  if(Array.isArray(row.pastRuns))out.recentPositions=row.pastRuns.filter(r=>r.surface===(meta.surface||'ダート')&&r.positions?.filter(x=>finite(x)!==null&&Number(x)>0).length>=2).map(r=>({track:r.track,distance:r.distance,positions:r.positions,fieldSize:r.fieldSize,date:r.date||'',raceClass:r.raceClass||'',weight:r.weight??''}));
  if(row.courseRecord)out.courseRecord={...row.courseRecord};
  if(finite(row.layoffWeeks)!==null)out.layoffWeeks=Number(row.layoffWeeks);

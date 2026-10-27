@@ -81,12 +81,23 @@ const agg = (xs: Outcome[]): Agg => ({
   rank: xs.length ? xs.reduce((a, x) => a + x.rank, 0) / xs.length : NaN,
 });
 
+// 決定的な疑似乱数によるブートストラップ（再現性のため固定シード）
+export function bootstrapMean(xs: number[], rounds = 2000): [number, number] {
+  let seed = 20261027;
+  const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32; };
+  const n = xs.length, means: number[] = [];
+  for (let b = 0; b < rounds; b++) { let t = 0; for (let k = 0; k < n; k++) t += xs[Math.floor(rnd() * n)]; means.push(t / n); }
+  means.sort((a, b) => a - b);
+  return [means[Math.floor(0.025 * rounds)], means[Math.floor(0.975 * rounds)]];
+}
+
 export type Config = { g: number; m: number };
 export type LabResult = {
   usable: number; oosN: number; minTrain: number; switches: number;
   fixed: Agg; chosen: Agg; odds: Agg | null; randomHit: number;
+  gainCI: [number, number] | null; // 損失改善(現行-選択)の平均の95%区間（ブートストラップ）
   best: { weights: Weights; blend: number; trainLl: number; defaultLl: number; gain: number } | null;
-  verdict: 'adopt' | 'keep' | 'insufficient';
+  verdict: 'adopt' | 'promising' | 'keep' | 'insufficient';
 };
 
 export function walkForward(preps: Prepared[], blendSteps: number[], opts: { minTrain?: number; minGain?: number } = {}): LabResult {
@@ -95,7 +106,7 @@ export function walkForward(preps: Prepared[], blendSteps: number[], opts: { min
   const configs: Config[] = [];
   WEIGHT_GRID.forEach((_, g) => blendSteps.forEach(m => configs.push({ g, m })));
   const defaultC = configs.findIndex(c => c.g === DEFAULT_GRID_INDEX && c.m === 0);
-  const empty: LabResult = { usable: rows.length, oosN: 0, minTrain, switches: 0, fixed: agg([]), chosen: agg([]), odds: null, randomHit: NaN, best: null, verdict: 'insufficient' };
+  const empty: LabResult = { usable: rows.length, oosN: 0, minTrain, switches: 0, fixed: agg([]), chosen: agg([]), odds: null, randomHit: NaN, gainCI: null, best: null, verdict: 'insufficient' };
   if (rows.length <= minTrain || defaultC < 0) return empty;
 
   const res: (Outcome | null)[][] = configs.map(c => rows.map(p => {
@@ -125,10 +136,14 @@ export function walkForward(preps: Prepared[], blendSteps: number[], opts: { min
   let bestC = defaultC;
   configs.forEach((_, c) => { if (mean(c) < mean(bestC)) bestC = c; });
   const oosGain = fixed.ll - chosen.ll;
-  const verdict: LabResult['verdict'] = chosen.n < 50 ? 'insufficient' : oosGain >= minGain && chosen.rank <= fixed.rank ? 'adopt' : 'keep';
+  const diffs = chosenOut.map((a, i) => fixedOut[i].ll - a.ll);
+  const gainCI = diffs.length >= 30 ? bootstrapMean(diffs) : null;
+  const improved = oosGain >= minGain && chosen.rank <= fixed.rank;
+  // 区間の下限が0を超えたときだけ「採用検討」。傾向のみなら「改善傾向」に留める。
+  const verdict: LabResult['verdict'] = chosen.n < 50 ? 'insufficient' : !improved ? 'keep' : gainCI && gainCI[0] > 0 ? 'adopt' : 'promising';
   return {
     usable: rows.length, oosN: chosen.n, minTrain, switches, fixed, chosen,
-    odds: oddsOut.length ? agg(oddsOut) : null, randomHit,
+    odds: oddsOut.length ? agg(oddsOut) : null, randomHit, gainCI,
     best: { weights: WEIGHT_GRID[configs[bestC].g], blend: configs[bestC].m, trainLl: mean(bestC), defaultLl: mean(defaultC), gain: mean(defaultC) - mean(bestC) },
     verdict,
   };

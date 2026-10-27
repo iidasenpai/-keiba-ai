@@ -11,7 +11,8 @@ const pct = (n: number, d: number) => {
 const fmt = (x: number, d = 3) => (Number.isFinite(x) ? x.toFixed(d) : '—');
 const wtext = (w: any) => `最高${w.best}/近走${w.avg5}/距離${w.dist}/コース${w.course}`;
 const verdictText: any = {
-  adopt: '未来レースでも現行より良い結果でした。採用を検討できます（ただし重みの変更は手動で行ってください）。',
+  adopt: '未来レースでも現行より明確に良い結果でした（改善幅の95%区間が0を超えています）。採用を検討できます。',
+  promising: '改善の傾向はありますが、偶然の範囲を超えたとは言えません。レースが増えるまで様子見が安全です。',
   keep: '未来レースでは現行の重みを上回りませんでした。現状維持が妥当です。',
   insufficient: '検証できるレースが少なく、判断できません。結果登録を増やしてください。',
 };
@@ -28,11 +29,13 @@ function Table({ title, r, hasOdds }: { title: string; r: any; hasOdds?: boolean
       <tr className="border-t text-gray-600"><td className="py-1">ランダム（期待値）</td><td>{r.oosN ? `${(100 * r.randomHit / r.oosN).toFixed(1)}%` : '—'}</td><td colSpan={3} /></tr>
     </tbody></table></div>
     {r.best && <p className="mt-1">全期間で見た最良: {wtext(r.best.weights)}{hasOdds ? `／オッズ併用 ${r.best.blend}` : ''}（損失 {fmt(r.best.defaultLl)}→{fmt(r.best.trainLl)}。選んだレースを含むため参考値）</p>}
+    {r.gainCI && <p className="mt-1">損失の改善幅（現行−選択）: {fmt((r.fixed.ll - r.chosen.ll))}（95%区間 {fmt(r.gainCI[0])}〜{fmt(r.gainCI[1])}）</p>}
     <p className="mt-1 font-bold">{verdictText[r.verdict]}</p>
   </div>;
 }
 
-export default function WeightLabPanel({ records }: { records: any[] }) {
+const RECOMMENDED = { best: 30, avg5: 70, dist: 0, course: 0 };
+export default function WeightLabPanel({ records, current, onApply }: { records: any[]; current?: any; onApply?: (w: any) => void }) {
   const [out, setOut] = useState<any>(null), [busy, setBusy] = useState(false), [err, setErr] = useState('');
   const run = () => {
     setBusy(true); setErr('');
@@ -48,6 +51,10 @@ export default function WeightLabPanel({ records }: { records: any[] }) {
     <summary className="font-black text-emerald-950">重み・オッズ併用の検証（未来レース方式）</summary>
     <p className="my-2">保存した事前予想の入力値から、重みを変えた場合を再計算します。各レースは「そのレースより前のレースだけ」で設定を選んで評価するため、結果を見てからの当てはめにはなりません。現行の重みは {wtext(DEFAULT_WEIGHTS)}。調教・コメント・脚質などの補正は含まず、基礎点だけの比較です。</p>
     <button className="rounded bg-emerald-700 px-3 py-1 font-bold text-white disabled:opacity-50" disabled={busy} onClick={run}>{busy ? '検証中…' : '検証を実行'}</button>
+    {onApply && <div className="mt-2 rounded border border-emerald-300 p-2">
+      <p>保存290Rでの検証では「{wtext(RECOMMENDED)}」が現行より損失・勝ち馬の平均順位とも良好でした（1位の的中率は同程度）。現在の設定: {current ? wtext(current) : '—'}</p>
+      <button className="mt-1 rounded border border-emerald-700 px-3 py-1 font-bold text-emerald-900" onClick={() => { if (window.confirm(`重みを ${wtext(RECOMMENDED)} に変更します。以後の予想に反映されます。よろしいですか？`)) onApply(RECOMMENDED); }}>この重みを適用</button>
+    </div>}
     {err && <p className="mt-2 text-red-700">{err}</p>}
     {out && <div>
       <p className="mt-2">保存{out.total}R中、検証に使えるのは{out.usable}R（オッズが全頭揃うのは{out.withOdds}R）。</p>

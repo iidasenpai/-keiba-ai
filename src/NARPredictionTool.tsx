@@ -3604,7 +3604,7 @@ export default function NARPredictionTool() {
       <details className="mx-3 mt-3 rounded-xl border bg-white p-3 text-xs"><summary className="font-bold">入力の根拠・不確実性を確認</summary><p className="mt-2">馬体重・増減は採点対象外。自動学習は同版・発走前固定済みの結果のみ。旧記録は保持し、係数は新しい版で1.0から検証します。</p><p className="mt-1">クラス：{raceClass||'未確認'}／新しい版の学習対象：{learningRaces.length}R。品質点は入力の充足で、的中確率ではありません。</p>{horses.filter(h=>!nonStarter(h)).map(h=><div key={h.id} className="border-t mt-2 pt-2"><strong>{h.umaban} {h.name}</strong><p>{uncertainty(h,{raceDate,scheduledStart,distance,surface,raceClass}).join('／')||'追加の不足表示なし（好走保証ではありません）'}</p></div>)}</details>
       <BatchImportPanel records={savedRaces} inbox={batchInbox} onImport={data=>{setBatchInbox(data);setBatchSummary(null);}} onOpen={applySourceDraft} onRun={startBatchPrediction} ready={loaded&&storageReady&&!batchTask} summary={batchSummary} />
       <ModelComparisonPanel records={savedRaces} />
-      <WeightLabPanel records={savedRaces} />
+      <WeightLabPanel records={savedRaces} current={weights} onApply={(w:any)=>setWeights(w)} />
       <ResultImportPanel records={savedRaces} onApply={applyBatchResults} ready={loaded&&storageReady&&!batchTask} />
 
       {/* テキスト一括入力 */}

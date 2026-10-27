@@ -2,6 +2,14 @@ import {commentScore} from './assessments';
 // v12: pure scoring, evidence and archive helpers. Historical records are never migrated in place.
 export const MODEL_VERSION = 'nar-safe-v12.7';
 export const MODEL_BUILD = 'v12.7-sha256-ff139cfde9ed19d579a2e6058bf2b8da36a03829cbbf19522b287ff07e1d02ee';
+// 学習（replayLearning）に使える保存予想の版。既定は現行版のみ。
+// 採点の変更が学習済みの補正値を無効にしないと判断した更新では、旧版をここへ追加して学習を引き継ぐ。
+// （MODEL_VERSION/MODEL_BUILD を上げても、追加しない限り従来どおり学習は初期値から再開）
+export const LEARNING_COMPATIBLE_VERSIONS: string[] = [];
+export const LEARNING_COMPATIBLE_BUILDS: string[] = [];
+export const learningCompatible = (lock: any, currentBuild: string): boolean =>
+  !!lock && (lock.modelVersion === MODEL_VERSION || LEARNING_COMPATIBLE_VERSIONS.includes(lock.modelVersion))
+  && (lock.build === currentBuild || LEARNING_COMPATIBLE_BUILDS.includes(lock.build));
 export const ACTIVE_FACTORS = ['training','comment','pace','jockey','body','ground','classFit','gate','pedigree','condition'];
 export const finite = (v:any):number|null => {
   if (v == null || String(v).trim()==='' || /^[-—–未]+$/.test(String(v).trim())) return null;

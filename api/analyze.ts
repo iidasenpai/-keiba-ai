@@ -1,14 +1,20 @@
 export const maxDuration = 60;
 
-type VercelRequest = { method?: string; body?: any };
+type VercelRequest = { method?: string; body?: any; headers?: Record<string, string | string[] | undefined> };
 type VercelResponse = { status: (code: number) => VercelResponse; json: (body: any) => any };
 
 const API_VERSION = "2024-11-30";
 const MODEL_ID = "prebuilt-layout";
-const MAX_POLLS = 24;
+// vercel.json の maxDuration(60秒)を超える前に自分でタイムアウトを返すための締切。
+// 強制終了されるとクライアントに原因の分かるエラーが届かないため、余裕を持たせる。
+const DEADLINE_MS = 55_000;
 // F0は結果取得が20回/分まで。3.5秒間隔なら上限を超えにくい。
 const POLL_DELAY_MS = 3500;
 const MAX_RATE_LIMIT_RETRIES = 3;
+// Vercel Functionsのリクエスト上限(約4.5MB)に収まるよう、base64文字列の長さで制限する。
+const MAX_BASE64_LENGTH = 4_000_000;
+const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -116,6 +122,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const endpoint = String(env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT ?? "").replace(/\/$/, "");
   const key = env.AZURE_DOCUMENT_INTELLIGENCE_KEY;
 
+  // ANALYZE_TOKEN を設定した場合のみ、x-analyze-token ヘッダーが一致しないリクエストを拒否する。
+  // 未設定なら従来どおり（既存の運用を壊さない）。
+  const requiredToken = env.ANALYZE_TOKEN;
+  if (requiredToken) {
+    const sent = req.headers?.["x-analyze-token"];
+    const sentToken = Array.isArray(sent) ? sent[0] : sent;
+    if (sentToken !== requiredToken) {
+      return res.status(401).json({ error: "認証トークンが一致しません" });
+    }
+  }
+
   if (!endpoint || !key) {
     return res.status(500).json({ error: "VercelのAzure環境変数が未設定です" });
   }
@@ -134,6 +151,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const meta = image.slice(0, comma);
     const base64 = image.slice(comma + 1);
     const contentType = meta.match(/^data:([^;]+)/)?.[1] ?? "image/jpeg";
+    if (!ALLOWED_TYPES.has(contentType)) {
+      return res.status(415).json({ error: "対応していない画像形式です（JPEG/PNG/WebPのみ）" });
+    }
+    if (base64.length > MAX_BASE64_LENGTH) {
+      return res.status(413).json({ error: "画像が大きすぎます。縮小して再試行してください" });
+    }
+    if (!BASE64_PATTERN.test(base64)) {
+      return res.status(400).json({ error: "画像データの形式が不正です" });
+    }
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -160,7 +186,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     let result: any = null;
     let rateLimitRetries = 0;
-    for (let i = 0; i < MAX_POLLS; i += 1) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt + POLL_DELAY_MS < DEADLINE_MS) {
       await sleep(POLL_DELAY_MS);
       const poll = await fetch(operationLocation, {
         headers: { "Ocp-Apim-Subscription-Key": key },
@@ -178,8 +205,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const message = String(data?.error?.message ?? raw);
         const retryFromMessage = Number(message.match(/retry after\s+(\d+)/i)?.[1] || 0);
         const waitSeconds = Math.max(5, retryHeader, retryFromMessage);
+        // 待機すると締切を超える場合は、強制終了される前に原因の分かるエラーで返す。
+        if (Date.now() - startedAt + waitSeconds * 1000 >= DEADLINE_MS) {
+          throw new Error("Azureのレート制限により時間内に完了しませんでした。少し待って再試行してください");
+        }
         await sleep(waitSeconds * 1000);
-        i -= 1;
         continue;
       }
 
@@ -199,7 +229,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (!result) {
-      throw new Error("Azure解析がタイムアウトしました");
+      throw new Error("Azure解析がタイムアウトしました（55秒）。画像を縮小するか、再試行してください");
     }
 
     const analyzeResult = result.analyzeResult ?? {};

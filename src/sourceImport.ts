@@ -21,7 +21,7 @@ function urlKind(url:string){
   return {u,id,kind};
  }
  if(u.hostname==='s.keibabook.co.jp'){
-  const m=u.pathname.match(/^\/chihou\/(cyokyo|danwa)\/(?:1|3)\/(\d{16})$/);if(!m)throw Error('競馬ブックURLが不正です');
+  const m=u.pathname.match(/^\/chihou\/(cyokyo|danwa)\/(?:1|2|3)\/(\d{16})$/);if(!m)throw Error('競馬ブックURLが不正です');
   return {u,id:m[2],kind:m[1]==='cyokyo'?'training':'comment'};
  }
  throw Error('未対応の参照サイトです');

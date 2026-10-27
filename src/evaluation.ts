@@ -125,7 +125,7 @@ export function walkForward(preps: Prepared[], blendSteps: number[], opts: { min
   let bestC = defaultC;
   configs.forEach((_, c) => { if (mean(c) < mean(bestC)) bestC = c; });
   const oosGain = fixed.ll - chosen.ll;
-  const verdict: LabResult['verdict'] = chosen.n < 50 ? 'insufficient' : oosGain >= minGain ? 'adopt' : 'keep';
+  const verdict: LabResult['verdict'] = chosen.n < 50 ? 'insufficient' : oosGain >= minGain && chosen.rank <= fixed.rank ? 'adopt' : 'keep';
   return {
     usable: rows.length, oosN: chosen.n, minTrain, switches, fixed, chosen,
     odds: oddsOut.length ? agg(oddsOut) : null, randomHit,

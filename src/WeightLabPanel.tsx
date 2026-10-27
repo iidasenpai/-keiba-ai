@@ -18,12 +18,13 @@ const verdictText: any = {
 
 function Table({ title, r, hasOdds }: { title: string; r: any; hasOdds?: boolean }) {
   const rows: [string, any][] = [['現行の重み（固定）', r.fixed], ['検証で選んだ設定', r.chosen]];
-  if (r.odds) rows.push(['人気順（オッズ1位が上位）', r.odds]);
+  // 人気順は「同じレース」で比べないと意味がないため、オッズ併用の表（②）だけに出す。
+  if (r.odds && hasOdds) rows.push([`人気順（同じ${r.odds.n}Rのみ）`, r.odds]);
   return <div className="mt-3 rounded border p-2">
     <strong>{title}</strong>
     <p className="mt-1">検証{r.oosN}R（最初の{r.minTrain}Rは学習のみ）。設定の切替 {r.switches}回。</p>
-    <div className="mt-1 overflow-x-auto"><table className="w-full text-left"><thead><tr><th>方式</th><th>1位が勝利</th><th>1位が3着内</th><th>勝ち馬の対数損失</th><th>勝ち馬の平均順位</th></tr></thead><tbody>
-      {rows.map(([name, a]) => <tr key={name} className="border-t"><td className="py-1">{name}</td><td>{pct(a.hit, a.n)}</td><td>{pct(a.place, a.n)}</td><td>{fmt(a.ll)}</td><td>{fmt(a.rank, 2)}</td></tr>)}
+    <div className="mt-1 overflow-x-auto"><table className="w-full text-left"><thead><tr><th>方式</th><th>1位が勝利</th><th>1位が3着内</th><th>勝ち馬の対数損失（低いほど良い）</th><th>勝ち馬の平均順位</th></tr></thead><tbody>
+      {rows.map(([name, a]) => <tr key={name} className="border-t"><td className="py-1">{name}</td><td>{pct(a.hit, a.n)}</td><td>{pct(a.place, a.n)}</td><td>{name.startsWith('人気順') ? '—' : fmt(a.ll)}</td><td>{fmt(a.rank, 2)}</td></tr>)}
       <tr className="border-t text-gray-600"><td className="py-1">ランダム（期待値）</td><td>{r.oosN ? `${(100 * r.randomHit / r.oosN).toFixed(1)}%` : '—'}</td><td colSpan={3} /></tr>
     </tbody></table></div>
     {r.best && <p className="mt-1">全期間で見た最良: {wtext(r.best.weights)}{hasOdds ? `／オッズ併用 ${r.best.blend}` : ''}（損失 {fmt(r.best.defaultLl)}→{fmt(r.best.trainLl)}。選んだレースを含むため参考値）</p>}

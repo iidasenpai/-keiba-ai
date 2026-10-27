@@ -1,3 +1,4 @@
+import {venueCandidate} from './venueCandidate';
 import {OI_MODEL_BUILD,OI_MODEL_VERSION} from './oiModel';
 import {TRAINING_CANDIDATE_VERSION} from './structuredTraining';
 // Storage and historical predictions are kept separate from live recalculation.
@@ -64,6 +65,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
     ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?{OiModel:{version:OI_MODEL_VERSION,predictions:rows(orderedPrediction(current)),diagnostics:current.map(h=>({umaban:h.umaban,...h.oiEvidence}))}}:{}),
     ...(metadata.track==='大井'&&Array.isArray(candidates.OiBaseline)?{OiBaseline:{version:'oi-baseline-v1',rule:'同時保存した共通入力の従来計算。専用版と同じ学習履歴の範囲を参照。',predictions:rows(orderedPrediction(candidates.OiBaseline))}}:{}),
     A: { version: 'prospective-A-v12', weights: [15,85,0,0], rule: 'v12修正済み補正を共有し基礎重みだけ変更。旧Aとは別集計。', predictions: rows(ordered), diagnostics:modelA.map(h=>({id:h.id,base:h._base,coreWeights:h._coreWeights,context:h._contextComponents,contextScale:h._contextScale,rawScore:h._rawScore,winScore:h._winScore,placeScore:h._placeScore,headAdj:h._headAdj,marketAdj:h._marketAnchorAdj,winAdj:h._winAdj,placeAdj:h._placeAdj,himoAdj:h._himoAdj})) },
+    ...(venueCandidate(metadata.track)==='Recent'?{VenueCandidate:{version:'venue-candidate-v1',rule:'会場別の近走指数のみ・検証候補',predictions:modelRows(current)}}:venueCandidate(metadata.track)==='Balanced'&&Array.isArray(candidates.Balanced)?{VenueCandidate:{version:'venue-candidate-v1',rule:'会場別の近走70候補・検証用',predictions:rows(orderedPrediction(candidates.Balanced))}}:{}),
     Recent: {version:'recent-only-v12',rule:'保存近走指数のみ・補正なし',predictions:modelRows(current)},
     Place: {version:'place-v12',rule:'保存PLACEスコア順・参考候補',predictions:modelRows(current,'_placeScore')},
     ...Object.fromEntries(['Simple85','Simple85Core'].filter(k=>Array.isArray(candidates[k])).map(k=>[k,{version:k==='Simple85'?'simple85-v12.7':'simple85-v12.7-core',weights:[15,85,0,0],rule:k==='Simple85'?'近走85・最高15、調教±1・コメント±0.5・展開±1、合計±2。人気・体重・順位学習補正なし。':'同じ基礎点のみ、補助点なし。',predictions:rows(orderedPrediction(candidates[k])),diagnostics:candidates[k].map(h=>({umaban:h.umaban,...h.candidateEvidence}))}])),

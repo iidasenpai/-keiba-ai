@@ -3,7 +3,7 @@ import {verifiedBeforeStart,nonStarter,finite} from './modelSafety';
 import {resultIssues} from './raceIntegrity';
 export {fixedComparison,distanceGroup} from './modelComparison';
 import {fixedComparison,fixedFieldSummary} from './modelComparison';
-const label={VenueCandidate:'会場別の検証候補',OiBaseline:'従来方式（同時保存）',Training:'調教補正候補',current:'現モデル（保存時）',A:'近走重視A',Recent:'近走指数のみ',Place:'3着内向け候補',Balanced:'近走70候補',Simple85:'近走85・補助点上限候補',Simple85Core:'近走85・基礎点のみ'};
+const label={NagoyaHeadRecent:'名古屋：現行◎＋近走順の相手',SonodaAux:'園田：調教・コメント補正候補',VenueCandidate:'会場別の検証候補',OiBaseline:'従来方式（同時保存）',Training:'調教補正候補',current:'現モデル（保存時）',A:'近走重視A',Recent:'近走指数のみ',Place:'3着内向け候補',Balanced:'近走70候補',Simple85:'近走85・補助点上限候補',Simple85Core:'近走85・基礎点のみ'};
 export default function ModelComparisonPanel({records}:{records:any[]}){
  const dates=useMemo(()=>[...new Set(records.filter(r=>r.status==='completed').map(r=>r.raceDate).filter(Boolean))].sort().reverse(),[records]);
  const builds=useMemo(()=>[...new Set(records.filter(r=>r.status==='completed'&&verifiedBeforeStart(r)).sort((a,b)=>String(b.predictionLock.lockedAt).localeCompare(String(a.predictionLock.lockedAt))).map(r=>r.predictionLock?.build).filter(Boolean))] as string[],[records]);
@@ -16,6 +16,8 @@ export default function ModelComparisonPanel({records}:{records:any[]}){
  const training=fixedComparison(records.filter(r=>r.predictionLock?.models?.Training?.version==='structured-training-v1'),date,['current','Training'],options);
  const oi=fixedComparison(records.filter(r=>r.track==='大井'&&r.predictionLock?.models?.OiModel?.version==='oi-specialist-v1'),date,['current','OiBaseline'],options);
  const venue=fixedComparison(records.filter(r=>r.predictionLock?.models?.VenueCandidate?.version==='venue-candidate-v1'),date,['current','VenueCandidate'],options);
+ const nagoya=fixedComparison(records.filter(r=>r.predictionLock?.models?.NagoyaHeadRecent?.version==='nagoya-head-recent-v1'),date,['current','NagoyaHeadRecent'],options);
+ const sonoda=fixedComparison(records.filter(r=>r.predictionLock?.models?.SonodaAux?.version==='sonoda-evidence-aux-v1'),date,['current','SonodaAux'],options);
  const pct=(n,d)=>d?`${n}/${d} (${(100*n/d).toFixed(1)}%)`:'未集計';
  return <section className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 text-xs"><details><summary className="font-black text-indigo-950">保存した事前予想でモデルを比較</summary>
   <div className="mt-2 flex flex-wrap gap-2"><label>対象日 <select aria-label="モデル比較の対象日" value={chosen} onChange={e=>setChosen(e.target.value)}><option value="latest">直近の結果日</option><option value="">全期間</option>{dates.map(d=><option key={d}>{d}</option>)}</select></label>
@@ -30,6 +32,7 @@ export default function ModelComparisonPanel({records}:{records:any[]}){
    <p className="mt-2 text-gray-600">1・2着および1〜3着の包含は着順不問です。頭数を増やすと買い目も増えるため、包含率の上昇だけで改善とは判断しません。</p>
   </div>
   <div className="mt-3 rounded border p-2"><strong>会場別候補の事前比較</strong><p>新たに保存した共通{venue.comparable}R。本番予想には適用しません。</p>{Object.entries(venue.totals).map(([k,t])=><p key={k}>{label[k]}：3着内 {pct(t.place,t.n)}／勝利 {pct(t.win,t.n)}</p>)}</div>
+  {[['名古屋の相手選択候補',nagoya],['園田の調教・コメント候補',sonoda]].map(([title,comparison]:any)=><div key={title} className="mt-3 rounded border p-2"><strong>{title}</strong><p>新規保存時から同時固定した共通{comparison.comparable}R。本予想には未適用。指数不足で順位のない馬は候補でも順位を作らず、的中保証として扱いません。</p>{Object.entries(comparison.totals).map(([k,t]:any)=><p key={k}>{label[k]}：◎勝利 {pct(t.win,t.n)}／◎3着内 {pct(t.place,t.n)}／上位5頭で1〜3着 {pct(t.top5,t.n)}</p>)}</div>)}
   <p className="my-2 font-bold">保存モデル間の比較：共通{data.comparable}R</p>
   <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr><th>モデル</th><th>1位が勝利</th><th>1位が3着内</th><th>上位3頭に勝ち馬</th><th>上位5頭に1〜3着全頭</th><th>上位6頭に1〜3着全頭</th></tr></thead><tbody>{Object.entries(data.totals).map(([k,t])=><tr key={k} className="border-t"><td className="py-2">{label[k]}</td><td>{pct(t.win,t.n)}</td><td>{pct(t.place,t.n)}</td><td>{pct(t.winner3,t.n)}</td><td>{pct(t.top5,t.n)}</td><td>{pct(t.top6,t.n)}</td></tr>)}</tbody></table></div>
   <div className="mt-3 rounded border p-2"><strong>近走85候補の事前検証</strong><p>現行と候補を同時に固定した{candidate.comparable}R。結果後の再計算は含めません。</p>{Object.entries(candidate.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭 {pct(t.top5,t.n)}</p>)}<p>候補は次の新規保存から記録。本命・印は現行を使用し、自動採用しません。候補の補助点は合計±2点、馬体重・人気・騎手・順位学習の上乗せは0です。</p></div>

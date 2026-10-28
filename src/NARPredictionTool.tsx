@@ -1,3 +1,4 @@
+import {nagoyaHeadRecent,sonodaAuxInputs} from './venueEvaluation';
 import {oiModel,OI_MODEL_BUILD} from './oiModel';
 import OiModelPanel from './OiModelPanel';
 import {structuredTrainingFields,trainingCandidateInputs} from './structuredTraining';
@@ -2787,8 +2788,9 @@ export default function NARPredictionTool() {
     };
     const trainingInputs=trainingCandidateInputs(computed,{raceDate,raceNo,track});
     const baseline=calculate(computed);
+    const sonodaInputs=sonodaAuxInputs(computed,{track,raceDate,raceNo,scheduledStart});
     const oi=oiModel(baseline,{track,distance,surface,raceDate,scheduledStart});
-    return { OiBaseline:oi&&[1200,1600].includes(Number(distance))?baseline:null, Training:track==='大井'?null:trainingInputs?calculate(trainingInputs):null, current: oi||baseline, A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
+    return { NagoyaHeadRecent:nagoyaHeadRecent(oi||baseline,track), SonodaAux:sonodaInputs?calculate(sonodaInputs):null, OiBaseline:oi&&[1200,1600].includes(Number(distance))?baseline:null, Training:track==='大井'?null:trainingInputs?calculate(trainingInputs):null, current: oi||baseline, A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
   }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn,raceDate,raceNo,scheduledStart,distance,surface,raceClass,track]);
 
   const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
@@ -3290,7 +3292,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.9.0', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {OiBaseline:modelRanked.OiBaseline,Training:modelRanked.Training,Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.9.0', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {NagoyaHeadRecent:modelRanked.NagoyaHeadRecent,SonodaAux:modelRanked.SonodaAux,OiBaseline:modelRanked.OiBaseline,Training:modelRanked.Training,Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];

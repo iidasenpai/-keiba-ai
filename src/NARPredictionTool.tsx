@@ -13,6 +13,7 @@ import { finite, validWeights, observed, cleanInputs, fieldAudit, estimatePace, 
 import { learningCompatible } from './modelSafety';
 import {planDraftUpdate,sourceFingerprint,missingSupplemental,inputWarnings,savedForDraft} from './predictionUpdates';
 import ModelComparisonPanel from './ModelComparisonPanel';
+import {styleFixedInputs} from './styleCandidate';
 import WeightLabPanel from './WeightLabPanel';
 import AuditPanel from './AuditPanel';
 import BatchImportPanel from './BatchImportPanel';
@@ -2514,7 +2515,8 @@ export default function NARPredictionTool() {
   }, [learningRaces, track, distance, marketOn]);
 
   const modelComputed = useMemo(() => {
-    const calculate = (modelWeights: any) => {
+    const calculate = (modelWeights: any, opt: any = {}) => {
+    const paceMode = opt.paceType ?? paceType; // 比較候補用。opt未指定なら従来どおり
     const parsed = horses.map((h) => {
       const recentMeta = recentConditionMeta(h);
       const styleProfile = effectiveStyleOf(h);
@@ -2573,11 +2575,12 @@ export default function NARPredictionTool() {
       if (base !== null) {
         if (h._start !== null && raceAvg.start !== null) paceAdj += (h._start - raceAvg.start) * 0.075;
         if (h._oikake !== null && raceAvg.oikake !== null) paceAdj += (h._oikake - raceAvg.oikake) * 0.055;
-        paceAdj += paceExpected(h._styleProfile,paceType,paceForecast,STYLE_PACE_SCORE)*0.55;
-        if (paceType!=='AUTO' && h._paceForecast !== null && raceAvg.forecast !== null) paceAdj += clamp((raceAvg.forecast - h._paceForecast) * 0.45, -1.2, 1.2);
+        paceAdj += paceExpected(h._styleProfile,paceMode,paceForecast,STYLE_PACE_SCORE)*0.55;
+        if (paceMode!=='AUTO' && h._paceForecast !== null && raceAvg.forecast !== null) paceAdj += clamp((raceAvg.forecast - h._paceForecast) * 0.45, -1.2, 1.2);
       }
 
       paceAdj *= learningOn ? effectiveLearned.pace : 1;
+      if (opt.noPace) paceAdj = 0; // 比較候補「展開補正なし」
 
       // 保存結果から「騎手×会場×距離」を学習。少数サンプルではほぼ動かさない。
       const exactSt = jockeyLearning.exact.get(`${track}|${distance}|${h.jockey}`);
@@ -2708,7 +2711,7 @@ export default function NARPredictionTool() {
       };
     });
     };
-    return { current: calculate(weights), A: calculate({ best:15, avg5:85, dist:0, course:0 }), Balanced: calculate({ best:15, avg5:70, dist:7.5, course:7.5 }) };
+    return { current: calculate(weights), A: calculate({ best:15, avg5:85, dist:0, course:0 }), Balanced: calculate({ best:15, avg5:70, dist:7.5, course:7.5 }), PaceAuto: calculate(weights,{paceType:'AUTO'}), PaceOff: calculate(weights,{noPace:true}) };
   }, [horses, weights, distance, track, surface, raceDate, scheduledStart, decayScale, oddsOn, oddsStrength, paceType, learningOn, learned, jockeyLearning, styleLearning, effectiveLearned, centralTransferLearning, conditionReliability]);
 
   const computed = modelComputed.current;
@@ -2790,7 +2793,9 @@ export default function NARPredictionTool() {
     const baseline=calculate(computed);
     const sonodaInputs=sonodaAuxInputs(computed,{track,raceDate,raceNo,scheduledStart});
     const oi=oiModel(baseline,{track,distance,surface,raceDate,scheduledStart});
-    return { NagoyaHeadRecent:nagoyaHeadRecent(oi||baseline,track), SonodaAux:sonodaInputs?calculate(sonodaInputs):null, OiBaseline:oi&&[1200,1600].includes(Number(distance))?baseline:null, Training:track==='大井'?null:trainingInputs?calculate(trainingInputs):null, current: oi||baseline, A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
+    const oiSpecialist=track==='大井'&&[1200,1600].includes(Number(distance));
+    const paceCandidatesOn=!oiSpecialist;
+    return { PaceAuto:paceCandidatesOn?calculate(modelComputed.PaceAuto):null, PaceOff:paceCandidatesOn?calculate(modelComputed.PaceOff):null, StyleFixed:paceCandidatesOn?calculate(styleFixedInputs(computed)):null, NagoyaHeadRecent:nagoyaHeadRecent(oi||baseline,track), SonodaAux:sonodaInputs?calculate(sonodaInputs):null, OiBaseline:oi&&[1200,1600].includes(Number(distance))?baseline:null, Training:track==='大井'?null:trainingInputs?calculate(trainingInputs):null, current: oi||baseline, A: calculate(modelComputed.A), Balanced: calculate(modelComputed.Balanced), Simple85:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), Simple85Core:simple85(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},false), UrawaCondition:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track}), UrawaConditionAux:conditionCandidate(computed,{raceDate,scheduledStart,distance,surface,raceClass,track},true) };
   }, [computed, modelComputed, headRankCalibration, himoLearning, winPlaceCalibration, marketOn,raceDate,raceNo,scheduledStart,distance,surface,raceClass,track]);
 
   const activeLockedRace = savedRaces.find((r:any)=>r.id===activeSavedRaceId && r.predictionLock);
@@ -3292,7 +3297,7 @@ export default function NARPredictionTool() {
       snapshot.horses = clone(ranked.map((h:any)=>({ ...h, predictedScore:h._finalScore, mark:h.mark||h._autoMark||'', manualMark:h.manualMark ?? (h.mark && h.mark!==h._autoMark ? h.mark : ''), autoMark:h._autoMark||'' })));
       if (resultTop3Of(snapshot).length || snapshot.horses.some((h:any)=>num(h.finish)!==null)) throw new Error('結果が入力済みです。事前予測として固定できません');
       if(replacing)snapshot.predictionRevisions=[...(replacing.predictionRevisions||[]),{replacedAt:snapshot.updatedAt,reason:'取得データの補完・更新',predictionLock:clone(replacing.predictionLock)}];
-      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.9.0', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {NagoyaHeadRecent:modelRanked.NagoyaHeadRecent,SonodaAux:modelRanked.SonodaAux,OiBaseline:modelRanked.OiBaseline,Training:modelRanked.Training,Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
+      snapshot.predictionLock = makeLock(snapshot.horses, modelRanked.A, { weights, paceType, learned:globalForPrediction, effectiveLearned, learningCount:learningRaces.length, learnedThrough:learningRaces.at(-1)?.resultUpdatedAt||learningRaces.at(-1)?.completedAt||null, inputVersion:'v12.9.0', sourceFingerprint:options?.fingerprint||null, raceDate, scheduledStart, sourceName, sourceRaceId, track, distance, surface, raceClass, raceNo, marketOn, decayScale, confidence, dataQuality }, snapshot.updatedAt, {NagoyaHeadRecent:modelRanked.NagoyaHeadRecent,SonodaAux:modelRanked.SonodaAux,OiBaseline:modelRanked.OiBaseline,PaceAuto:modelRanked.PaceAuto,PaceOff:modelRanked.PaceOff,StyleFixed:modelRanked.StyleFixed,Training:modelRanked.Training,Balanced:modelRanked.Balanced,Simple85:modelRanked.Simple85,Simple85Core:modelRanked.Simple85Core,UrawaCondition:modelRanked.UrawaCondition,UrawaConditionAux:modelRanked.UrawaConditionAux});
       snapshot.predictedAt = snapshot.predictionLock.lockedAt;
       snapshot.status = 'pending';
       const next = [snapshot,...live.current.savedRaces.filter((r:any)=>r.id!==id)];

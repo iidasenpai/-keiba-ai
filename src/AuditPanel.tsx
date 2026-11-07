@@ -5,8 +5,9 @@ import {finite,nonStarter,fieldAudit,summarizeModels,raceDiagnostics,validateFul
 const pct=(x:number,n:number)=>n?`${x}/${n} (${(100*x/n).toFixed(1)}%)`:'未集計';
 const box='rounded-xl border border-slate-200 bg-white p-3 mt-3';
 const input='block w-full rounded border border-slate-300 p-2 text-xs';
-export default function AuditPanel({records,currentId,onCommit}:{records:any[],currentId:string|null,onCommit:(records:any[])=>Promise<void>}) {
-  const [open,setOpen]=useState(false),[selected,setSelected]=useState('');
+function AuditContent({records,currentId,onCommit}:{records:any[],currentId:string|null,onCommit:(records:any[])=>Promise<void>}) {
+  const open=true;
+  const [selected,setSelected]=useState('');
   const [rows,setRows]=useState<any[]>([]),[evidence,setEvidence]=useState(''),[date,setDate]=useState('');
   const [verified,setVerified]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
   const [bet,setBet]=useState({type:'単勝',selection:'',stake:'100',status:'参考',odds:'',oddsAt:''});
@@ -54,7 +55,7 @@ export default function AuditPanel({records,currentId,onCommit}:{records:any[],c
     return [...m].map(([key,rs])=>({key,...outcomeStats(rs)})).sort((a,b)=>b.n-a.n);
   },[valid]);
   return <section id="audit-panel" className="mx-3 mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3">
-    <button className="w-full text-left font-black text-sky-950" onClick={()=>setOpen(v=>!v)}>データ確認・固定モデル比較 {open?'▲':'▼'}</button>
+
     <div className="text-xs mt-2">全{records.length}件 / 結果整合{valid.length}件 / 隔離・予想未照合{quarantined.length}件 / 待ち{records.filter(r=>r.status!=='completed').length}件</div>
     <div className="text-[11px] mt-1">現行 {MODEL_VERSION}。近走重視A・近走単独・PLACEを保存時に同時固定。旧Bの4/5位入替は新規予測に使いません。</div>
     {open&&<>
@@ -111,4 +112,12 @@ export default function AuditPanel({records,currentId,onCommit}:{records:any[],c
       </div>
     </>}
   </section>;
+}
+
+export default function AuditPanel(props:{records:any[],currentId:string|null,onCommit:(records:any[])=>Promise<void>}) {
+ const [open,setOpen]=useState(false);
+ return <div className="mx-3 mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3">
+  <button className="w-full text-left font-black text-sky-950" aria-expanded={open} onClick={()=>setOpen(v=>!v)}>データ確認・固定モデル比較 {open?'▲':'▼'}</button>
+  {open&&<AuditContent {...props}/>}
+ </div>;
 }

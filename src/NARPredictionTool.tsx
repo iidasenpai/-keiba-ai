@@ -215,6 +215,7 @@ export default function NARPredictionTool() {
   const [learningHistory, setLearningHistory] = useState<any[]>([]);
   const [flowFocusId, setFlowFocusId] = useState<string>("");
   const [horseDbOpen, setHorseDbOpen] = useState(false);
+  const [analysisOpen,setAnalysisOpen] = useState(false);
   const [horseDbQuery, setHorseDbQuery] = useState("");
   const [horseDbSelected, setHorseDbSelected] = useState<string>("");
 
@@ -229,11 +230,12 @@ export default function NARPredictionTool() {
   live.current = { state: currentState, savedRaces };
   const validHistory = useMemo(() => savedRaces.filter(r=>r.status==='completed'&&!resultIssues(r).length).map(predictionView),[savedRaces]);
   const learningRaces = useMemo(() => learningOn ? eligibleHistory(validHistory,new Date(Math.min(Date.now(),scheduledStart?Date.parse(scheduledStart):raceDate?Date.parse(raceDate+'T00:00:00+09:00'):Date.now())).toISOString(),activeSavedRaceId||undefined).filter(r=>verifiedBeforeStart(r)&&learningCompatible(r.predictionLock,predictionBuild)).map(r=>({...r,horses:r.horses.filter(h=>!nonStarter(h))})) : [],[validHistory,learningOn,scheduledStart,raceDate,activeSavedRaceId,predictionBuild]);
-  const abVerification = useMemo(() => abSummary(savedRaces), [savedRaces]);
+  const abVerification = useMemo(() => analysisOpen ? abSummary(savedRaces) : {count:0,a:0,b:0}, [savedRaces,analysisOpen]);
   const persist = async (nextRaces: any[], statePatch: any = {}) => {
     const state = { ...live.current.state, ...statePatch };
     if (new Set(nextRaces.map(r => r.id)).size !== nextRaces.length) throw new Error('保存IDの重複を検出しました');
-    if (live.current.savedRaces.some((r: any) => !nextRaces.some(n => n.id === r.id))) throw new Error('既存レースを消す保存はできません');
+    const nextIds = new Set(nextRaces.map(r=>r.id));
+    if (live.current.savedRaces.some((r: any) => !nextIds.has(r.id))) throw new Error('既存レースを消す保存はできません');
     const revision = storageRevision.current;
     const snapshot = { schemaVersion: 3, revision: revision+1, updatedAt: new Date().toISOString(), state, archiveKey:'nar-saved-races' };
     const values:any = { [SNAPSHOT_KEY]: JSON.stringify(snapshot), 'nar-tool-state': JSON.stringify(state) };
@@ -2006,6 +2008,7 @@ export default function NARPredictionTool() {
   // 別ストレージへ複製せず nar-saved-races を正本にするため、既存バックアップとの互換性を保つ。
   const normalizeHorseDbName = (v:any) => String(v || "").replace(/[\s　]+/g, "").trim();
   const horseDatabase = useMemo(() => {
+    if (!horseDbOpen) return [];
     const map = new Map<string, any>();
     savedRaces.forEach((race:any) => {
       (race.horses || []).forEach((h:any) => {
@@ -2041,7 +2044,7 @@ export default function NARPredictionTool() {
       });
     });
     return Array.from(map.values()).map((d:any) => ({...d, records:d.records.sort((a:any,b:any)=>String(b.savedAt).localeCompare(String(a.savedAt)))})).sort((a:any,b:any)=>b.starts-a.starts || a.name.localeCompare(b.name,"ja"));
-  }, [savedRaces]);
+  }, [savedRaces,horseDbOpen]);
   const selectedHorseDb:any = horseDatabase.find((d:any)=>d.key===horseDbSelected) || null;
   const downloadJsonFile = (filename:string, data:any) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
@@ -3159,6 +3162,7 @@ export default function NARPredictionTool() {
   };
 
   const learningSummary = useMemo(() => {
+    if (!analysisOpen) return {total:0,topWin:0,topPlace:0,markedTop3:0,totalTop3:0};
     const completed = validHistory.filter((r)=>r.status === "completed");
     let topWin=0, topPlace=0, markedTop3=0, totalTop3=0, total=0;
     completed.forEach((r)=>{
@@ -3176,7 +3180,7 @@ export default function NARPredictionTool() {
       markedTop3 += actual.filter((h:any)=>["◎","○","▲","△","☆"].includes(h.mark||h._autoMark||"")).length;
     });
     return { total, topWin, topPlace, markedTop3, totalTop3 };
-  }, [validHistory]);
+  }, [validHistory,analysisOpen]);
 
   const dataQuality = useMemo(()=>fieldAudit(ranked),[ranked]);
   const confidence = useMemo(()=>{
@@ -3213,6 +3217,7 @@ export default function NARPredictionTool() {
   };
 
   const conditionStats = useMemo(()=>{
+    if (!analysisOpen || analysisTab!=="conditions") return [];
     const map=new Map<string,any>();
     validHistory.filter(r=>r.status==='completed').forEach(r=>{
       const key=`${r.track} ${r.distance||''}m`;
@@ -3227,9 +3232,10 @@ export default function NARPredictionTool() {
       map.set(key,st);
     });
     return [...map.values()].sort((a,b)=>b.races-a.races);
-  },[validHistory]);
+  },[validHistory,analysisOpen,analysisTab]);
 
   const backtest = useMemo(()=>{
+    if (!analysisOpen || analysisTab!=="backtest") return {races:0,win:0,place:0,top3Capture:0};
     const completed=validHistory.filter(r=>r.status==='completed');
     let races=0, win=0, place=0, top3Capture=0;
     completed.forEach(r=>{
@@ -3244,7 +3250,7 @@ export default function NARPredictionTool() {
       top3Capture += actual.filter((h:any)=>['◎','○','▲','△','☆'].includes(h.mark||'')).length;
     });
     return {races,win,place,top3Capture};
-  },[validHistory]);
+  },[validHistory,analysisOpen,analysisTab]);
 
   const currentRaceSnapshot = (id: string = crypto.randomUUID(), previous: any = {}): any => ({
     ...previous,
@@ -3661,7 +3667,7 @@ export default function NARPredictionTool() {
             <button onClick={saveResultAndLearn} className="rounded-xl bg-purple-700 px-4 py-3 text-sm font-black text-white shadow-sm">結果保存・学習</button>
           )}
           <button onClick={() => setSavedRacesOpen((v) => !v)} className="rounded-xl bg-slate-800 px-4 py-3 text-sm font-black text-white shadow-sm">保存済み {savedRaces.length ? `(${savedRaces.length})` : ""}</button>
-          <button onClick={() => setHorseDbOpen((v)=>!v)} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white shadow-sm">馬データベース ({horseDatabase.length})</button>
+          <button onClick={() => setHorseDbOpen((v)=>!v)} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white shadow-sm">馬データベース{horseDbOpen ? ` (${horseDatabase.length})` : ""}</button>
           {!resultEntryMode && <button onClick={autoCompleteCurrentHorses} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">入力を点検</button>}
           {resultEntryMode && <button onClick={() => setResultEntryMode(false)} className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-600">結果入力を閉じる</button>}
         </div>
@@ -3930,9 +3936,9 @@ export default function NARPredictionTool() {
         {track==='大井'&&[1200,1600].includes(Number(distance))?'大井専用：近走指数で本命候補を選び、13頭以上では相手候補の点数に近走中央値を15%混ぜます。':'総合指数は実測指数と近走・展開・騎手・調教・コメント等の補助評価から計算します。'}
         「未」は未知です。最高指数で適性を埋めず、使える実測指数だけで配分します。解析後は「レースを保存」、レース終了後は「保存済みレース」から結果を入力します。
 
-      <details className="mx-3 mt-3 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <details open={analysisOpen} onToggle={e=>setAnalysisOpen(e.currentTarget.open)} className="mx-3 mt-3 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <summary className="cursor-pointer list-none px-4 py-3 text-sm font-black text-slate-800">⚙️ 詳細設定・学習分析 <span className="ml-2 text-[10px] font-normal text-slate-400">必要な時だけ開く</span></summary>
-        <div className="border-t border-slate-100 pb-3">
+        {analysisOpen && <div className="border-t border-slate-100 pb-3">
       {/* タイム指数ウェイト設定 */}
       <div className="bg-white mx-3 mt-3 rounded-lg shadow-sm border border-gray-200 p-3">
         <div className="text-xs font-bold text-gray-500 mb-2">基本指数ウェイト（自動学習対象外 / 合計 {wSum}）</div>{track==='大井'&&[1200,1600].includes(Number(distance))&&<p className="mb-2 text-xs text-blue-900">このレースは大井専用配分です。以下のウェイトは専用計算には使いません。</p>}
@@ -4010,7 +4016,7 @@ export default function NARPredictionTool() {
         {analysisTab==='backtest' && <div className="mt-3 grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4"><div className="rounded bg-indigo-50 p-3"><div>対象</div><b>{backtest.races}R</b></div><div className="rounded bg-indigo-50 p-3"><div>◎勝率</div><b>{backtest.races?Math.round(backtest.win/backtest.races*100):0}%</b></div><div className="rounded bg-indigo-50 p-3"><div>◎複勝率</div><b>{backtest.races?Math.round(backtest.place/backtest.races*100):0}%</b></div><div className="rounded bg-indigo-50 p-3"><div>印の3着内捕捉</div><b>{backtest.races?Math.round(backtest.top3Capture/(backtest.races*3)*100):0}%</b></div></div>}
       </div>
 
-        </div>
+        </div>}
       </details>
 
       {resultEntryMode && (

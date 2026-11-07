@@ -253,16 +253,16 @@ export default function NARPredictionTool() {
     let cancelled = false;
     (async () => {
       try {
-        const stored = await window.storage.getMany([SNAPSHOT_KEY,'nar-tool-state','nar-saved-races']);
-        const dataVersion=(v:any)=>{try{return JSON.parse(v['nar-tool-state']||'{}').engineVersion||0;}catch{return 0;}};
-        const canonical = { value:stored[SNAPSHOT_KEY] };
+        const canonical = { value:(await window.storage.getMany([SNAPSHOT_KEY]))[SNAPSHOT_KEY] };
         if (cancelled) return;
         const archive = canonical.value ? JSON.parse(canonical.value) : null;
+        const stored = await window.storage.getMany(archive ? (archive.schemaVersion===1 ? [] : ['nar-saved-races']) : ['nar-tool-state','nar-saved-races']);
         if (archive && (![1,2,3].includes(archive.schemaVersion) || !archive.state || (archive.schemaVersion===1 && !Array.isArray(archive.savedRaces)) || (archive.schemaVersion>=2 && archive.archiveKey!=='nar-saved-races'))) throw new Error('一括保存データの形式が不正です');
         storageRevision.current = Number(archive?.revision || 0);
-        const res = archive ? { value: JSON.stringify(archive.state) } : { value:stored['nar-tool-state'] };
-        if (res && res.value) {
-          const data = JSON.parse(res.value);
+        const res = {value:stored['nar-tool-state']};
+        const restoredState = archive?.state || (res.value ? JSON.parse(res.value) : null);
+        if (restoredState) {
+          const data = restoredState;
           if (data.raceName !== undefined) setRaceName(data.raceName);
           if (data.raceNo !== undefined) setRaceNo(String(data.raceNo));
           if (data.track) setTrack(data.track);
@@ -293,12 +293,12 @@ export default function NARPredictionTool() {
           if (Array.isArray(items) && items.length) {
             // Preserve historical objects byte-for-byte in meaning; no silent factor migration.
             const normalized = items;
-            if (!archive) migrationBackup.current = { createdAt:new Date().toISOString(), originalState:res?.value ? JSON.parse(res.value) : {}, raceCount:items.length, archiveRetained:true };
+            if (!archive) migrationBackup.current = { createdAt:new Date().toISOString(), originalState:restoredState || {}, raceCount:items.length, archiveRetained:true };
             // v11.0 embedded the archive; migrate that authoritative copy once.
             archiveWritten.current = archive?.schemaVersion===1 ? null : normalized;
             setHistoryCount(normalized.filter((r:any)=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length);
             setSavedRaces(normalized);
-            if(dataVersion(stored)<12){const replay=replayLearning(normalized);setLearned(replay.learned);setLearningHistory(prev=>[...prev,{at:new Date().toISOString(),kind:'v12-replay',count:replay.count,values:replay.learned}]);}
+            if((restoredState?.engineVersion||0)<12){const replay=replayLearning(normalized);setLearned(replay.learned);setLearningHistory(prev=>[...prev,{at:new Date().toISOString(),kind:'v12-replay',count:replay.count,values:replay.learned}]);}
           }
         } else {
           // First launch on a new origin (e.g. GitHub Pages): restore the bundled
@@ -3546,6 +3546,8 @@ export default function NARPredictionTool() {
     })().catch(e=>{finish([...task.results,{ok:false,label:`${draft.meta.track}${draft.meta.raceNo}R`,error:e.message}],true);});
   },[batchTask]);
 
+  if (!loaded) return <main className="min-h-screen bg-gray-100 p-6 text-gray-900"><h1 className="text-lg font-bold">地方競馬AI予想帳</h1><p role="status" className="mt-4">保存データを読み込んでいます。画面を閉じずにお待ちください。</p><p className="mt-2 text-xs">起動修正2・2026年11月7日</p></main>;
+
   return (
     <div className="min-h-screen bg-gray-100 text-gray-900 pb-16">
       <fieldset disabled={!!batchTask} className="contents">
@@ -3553,7 +3555,7 @@ export default function NARPredictionTool() {
       <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.9.0・大井専用モデル</span>
+          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.9.0・大井専用モデル／起動修正2</span>
         </div>
         {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
       </div>

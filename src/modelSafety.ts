@@ -203,15 +203,16 @@ export function ledgerSummary(records:any[]) {
 }
 function base64(bytes:Uint8Array){let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(s);}
 export async function encodeArchive(records:any[]) {
-  const raw=JSON.stringify(records);
-  if(typeof CompressionStream==='undefined')return raw;
-  const zipped=await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  if(typeof CompressionStream==='undefined')return JSON.stringify(records);
+  // Serialize one record per pull; never retain the entire uncompressed JSON.
+  const encoder=new TextEncoder();
+  let index=-1;
+  const source=new ReadableStream<Uint8Array>({pull(controller){
+    if(index===-1){controller.enqueue(encoder.encode('['));index=0;return;}
+    if(index<records.length){const row=JSON.stringify(records[index])??'null';controller.enqueue(encoder.encode((index?',':'')+row));index++;return;}
+    controller.enqueue(encoder.encode(']'));controller.close();
+  }});
+  const zipped=await new Response(source.pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
   return JSON.stringify({encoding:'nar-gzip-v1',data:base64(new Uint8Array(zipped))});
 }
-export async function decodeArchive(text:string) {
-  const data=JSON.parse(text);if(Array.isArray(data))return data;
-  if(data?.encoding!=='nar-gzip-v1'||typeof DecompressionStream==='undefined')throw new Error('保存形式を読み込めません。この端末のブラウザを更新してください');
-  const bytes=Uint8Array.from(atob(data.data),c=>c.charCodeAt(0));
-  const raw=await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
-  const rows=JSON.parse(raw);if(!Array.isArray(rows))throw new Error('保存レース形式が不正です');return rows;
-}
+export { decodeArchiveStream as decodeArchive } from './archiveReader';

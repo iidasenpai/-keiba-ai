@@ -1,3 +1,4 @@
+import {workoutReadings,TRAINING_READING_VERSION} from './trainingReadings';
 // Evidence text is not a rating. Preserve the note and expose the derived score separately.
 const clamp=(n:number,l:number,h:number)=>Math.max(l,Math.min(h,n));
 const harmless=/(?:僅かな|わずかな)?(?:遅れ|後着)(?:は|も|が)?(?:心配|不安|問題)(?:は)?(?:なし|ない|無|なく)|(?:心配|不安|問題|反動)(?:は|も|が)?(?:なし|ない|無|なく)|遅れ心配なし/g;
@@ -47,9 +48,16 @@ export function trainingAssessment(block:{summary:string;arrow:string;lines:stri
  if(/先着/.test(words))score+=2;if(/同入/.test(words))score++;
  if(/遅れ/.test(words))score-=3;
  if(/馬なり余力/.test(words))score++;
- const lastF=workout.lastF;if(lastF!==null){if(lastF<=11.3)score+=4;else if(lastF<=11.8)score+=3;else if(lastF<=12.3)score+=2;else if(lastF>=13.5)score-=2;}
- if(/一杯に追う|叩き一杯/.test(words)&&lastF!==null&&lastF>=13)score-=2;
+ const readings=workoutReadings(block.lines), latest=readings.latest;
+ // Absolute clocks across courses are not comparable. Effort alone is not a rating.
+ // Existing prose assessment remains; new trial effects are capped at +/- 1 score unit each.
+ const lastF=latest?.lastF??null;
+ const acceleration=latest?.acceleration??null;
+ const effortScale=latest?.effort==='馬なり'?1:latest?.effort==='強め'?.75:latest?.effort==='一杯'?.5:0;
+ const accelerationPoints=acceleration===null?0:clamp(acceleration,-1,1)*(acceleration>0?effortScale:1);
+ const previousPoints=readings.previousDelta===null?0:clamp(readings.previousDelta,-1,1);
+ score+=accelerationPoints+previousPoints;
  if(/連闘.*軽め|攻め軽め|低負荷/.test(block.summary))score=Math.min(score,1);
  const numeric=Math.round(clamp(70+score*4,30,97));
- return {numeric,grade:numeric>=88?'S':numeric>=78?'A':numeric>=65?'B':numeric>=50?'C':'D',lastF,workoutDate:workout.latest?.label||'',clockVerified:!!workout.latest};
+ return {numeric,grade:numeric>=88?'S':numeric>=78?'A':numeric>=65?'B':numeric>=50?'C':'D',lastF,workoutDate:latest?.label||workout.latest?.label||'',clockVerified:lastF!==null,version:TRAINING_READING_VERSION,effort:latest?.effort||'',acceleration,previousDelta:readings.previousDelta,accelerationPoints,previousPoints,comparisonReason:readings.previousDelta===null?'前走時の同コース・同馬場・同追い方の1Fが不足：前回比0':'前走時と同コース・同馬場・同追い方で比較'};
 }

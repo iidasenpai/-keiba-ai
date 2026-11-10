@@ -433,10 +433,10 @@ export default function NARPredictionTool() {
     setHorses((h) => h.map((x) => {
       if (x.id !== id) return x;
       const raw = Object.fromEntries(Object.entries(cleanInputs(x)).filter(([k])=>!k.startsWith('_') && k!=='predictedScore'));
-      return { ...raw, factorSources:{...(x.factorSources||{}),[field]:'manual'}, [field]:value, ...(field==='mark'?{manualMark:value}:{}) };
+      return { ...raw, factorSources:{...(x.factorSources||{}),[field]:'manual'}, [field]:value, ...(['trainingScore','training','trainingNote'].includes(field)?{trainingEvidence:undefined}:{}), ...(field==='mark'?{manualMark:value}:{}) };
     }));
   const updateTrainingGrade = (id, grade) =>
-    setHorses((h) => h.map((x) => x.id === id ? { ...Object.fromEntries(Object.entries(cleanInputs(x)).filter(([k])=>!k.startsWith('_') && k!=='predictedScore')), factorSources:{...(x.factorSources||{}),trainingScore:'manual'}, training: grade, trainingScore: String(GRADE_TO_TRAINING_100[grade] ?? 70) } : x));
+    setHorses((h) => h.map((x) => x.id === id ? { ...Object.fromEntries(Object.entries(cleanInputs(x)).filter(([k])=>!k.startsWith('_') && k!=='predictedScore')), factorSources:{...(x.factorSources||{}),trainingScore:'manual'}, training: grade, trainingScore: String(GRADE_TO_TRAINING_100[grade] ?? 70), trainingEvidence:undefined } : x));
 
   const autoCompleteCurrentHorses = () => {
     setHorses((prev) => prev.map((h) => autoCompleteHorseFactors(h, { track, surface, distance, raceClass })));
@@ -920,7 +920,7 @@ export default function NARPredictionTool() {
       horse.training = evaluated.grade;
       horse.trainingScore = String(evaluated.numeric);
       horse.trainingEvidence = evaluated;
-      horse.trainingNote = `${block.summary}${block.arrow ? ` ${block.arrow}` : ""}`.trim();
+      horse.trainingNote = [`${block.summary} ${block.arrow}`.trim(), ...block.lines].join("\n");
       applied += 1;
     }
 
@@ -3799,7 +3799,10 @@ export default function NARPredictionTool() {
                 {COMMENT_TRAINING_TRACKS.includes(track) && <div className="mt-2 rounded-xl border border-orange-200 bg-orange-50 p-3">
                   <div className="flex items-center justify-between gap-2"><div><div className="text-[10px] font-black text-orange-800">🏇 調教評価</div><div className="text-[9px] text-orange-600">予想への反映値をここで確認できます</div></div><div className="text-right"><div className="text-lg font-black text-orange-800">{h._trainingScore!==null&&h._trainingScore!==undefined?Math.round(Number(h._trainingScore)):h.trainingScore||"-"}<span className="text-[9px] ml-0.5">点</span></div><div className="text-[9px] font-bold text-orange-600">補正 {h._trainingAdj==null?'未記録':`${h._trainingAdj>=0?'+':''}${Number(h._trainingAdj).toFixed(1)}`}</div></div></div>
                   <div className="mt-2 grid grid-cols-2 gap-2"><label className="rounded-lg bg-white p-2"><span className="block text-[9px] font-bold text-slate-400">評価</span><select value={h.training||"B"} onChange={(e)=>updateTrainingGrade(h.id,e.target.value)} className="mt-1 w-full bg-transparent font-black text-orange-800 outline-none">{["S","A","B","C","D"].map(x=><option key={x}>{x}</option>)}</select></label><label className="rounded-lg bg-white p-2"><span className="block text-[9px] font-bold text-slate-400">100点評価</span><input inputMode="numeric" value={h.trainingScore??""} onChange={(e)=>updateHorse(h.id,"trainingScore",e.target.value)} className="mt-1 w-full bg-transparent font-black text-orange-800 outline-none" placeholder="未入力"/></label></div>
-                  {h.trainingNote&&<div className="mt-2 rounded-lg bg-white px-2 py-1.5 text-[10px] leading-relaxed text-slate-600">{h.trainingNote}</div>}
+                  {h.trainingEvidence?.version==='training-reading-v2'&&<div className="mt-2 text-[10px] text-orange-900">追い方：{h.trainingEvidence.effort||'未確認'} ／ 終い1F：{h.trainingEvidence.lastF??'未取得'} ／ 加速：{h.trainingEvidence.acceleration==null?'区間不足':`${h.trainingEvidence.acceleration}秒（正は加速）`}<br/>前走時比：{h.trainingEvidence.previousDelta==null?'比較不可':`${h.trainingEvidence.previousDelta}秒（正は短縮）`}。{h.trainingEvidence.comparisonReason}<br/>追い方単独・本数・厩舎比較は加減点しません。ラップ・前回比の補正は仮設定で効果未検証です。</div>}
+                  <label className="mt-2 block text-[10px] text-orange-900">調教記録（後から入力・貼り付け可）<textarea value={h.trainingNote||''} onChange={e=>updateHorse(h.id,'trainingNote',e.target.value)} rows={5} className="mt-1 w-full rounded border bg-white p-2 text-xs" placeholder={'順調\n11/08 コース:川崎 馬場:良 馬なり\n2F 25.0 1F 12.0'}/></label>
+                  <button type="button" disabled={!String(h.trainingNote||'').trim()} className="mt-1 rounded border border-orange-300 bg-white px-3 py-2 text-xs font-bold" onClick={()=>setHorses(prev=>parseTrainingText(`${h.umaban} ${h.name} ${String(h.trainingNote||'').split('\n')[0]||'手入力'} →\n${h.trainingNote||''}`,prev).map(x=>x.id===h.id?{...x,trainingNote:h.trainingNote,factorSources:{...(x.factorSources||{}),trainingScore:'manual'}}:x))}>この調教記録を読み取り</button>
+                  <p className="mt-1 text-[10px] text-slate-500">入力後に読み取り、発走前に予想を保存してください。1F・2Fなど区間を明記。前走時は「(前回) 日付」で入力します。保存済み成績への後付けはしません。</p>
                 </div>}
                 <div className="mt-2 flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-2 text-[10px]">
                   <span>同場同距離 <b>{h._recentMeta?.sameCount||0}本</b></span>

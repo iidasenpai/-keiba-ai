@@ -7,7 +7,7 @@ import {trainingAssessment} from './assessments';
 import {conditionCandidate} from './conditionCandidate';
 import ConditionEvidencePanel from './ConditionEvidencePanel';
 import {structuredFormFields,sourceDetailIssues,raceClassFromName,uncertainty,simple85} from './evidenceReview';
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { SNAPSHOT_KEY } from "./storage";
 import { finite, validWeights, observed, cleanInputs, fieldAudit, estimatePace, paceExpected, scoreParts, fieldProbabilities, scoreComment, MODEL_VERSION, MODEL_BUILD, ACTIVE_FACTORS, eligibleHistory, eventKey, raceInstant, outcomeStats, verifiedBeforeStart, latestLearning, encodeArchive, decodeArchive, nonStarter } from './modelSafety';
 import { learningCompatible } from './modelSafety';
@@ -159,6 +159,7 @@ const normalizeLearningAppliedFlag = (race:any) => {
   return race;
 };
 
+const PerformanceDashboard=lazy(()=>import('./PerformanceDashboard'));
 export default function NARPredictionTool() {
   const [batchInbox,setBatchInbox]=useState<any>(null);
   const [batchTask,setBatchTask]=useState<any>(null);
@@ -210,6 +211,7 @@ export default function NARPredictionTool() {
   const [resultEntryMode, setResultEntryMode] = useState(false);
   const [activeSavedRaceId, setActiveSavedRaceId] = useState<string | null>(null);
   const [reviewRaceId, setReviewRaceId] = useState<string | null>(null);
+  const [workspaceView,setWorkspaceView]=useState<'race'|'performance'>('race');
   const [analysisTab, setAnalysisTab] = useState<"review"|"conditions"|"backtest">("review");
   const [resultOrderInput, setResultOrderInput] = useState("");
   const [learningHistory, setLearningHistory] = useState<any[]>([]);
@@ -3549,30 +3551,14 @@ export default function NARPredictionTool() {
   if (!loaded) return <main className="min-h-screen bg-gray-100 p-6 text-gray-900"><h1 className="text-lg font-bold">地方競馬AI予想帳</h1><p role="status" className="mt-4">保存データを読み込んでいます。画面を閉じずにお待ちください。</p><p className="mt-2 text-xs">起動修正2・2026年11月7日</p></main>;
 
   return (
-    <div className="min-h-screen bg-gray-100 text-gray-900 pb-16">
+    <div className="nar-app min-h-screen text-gray-900 pb-16">
       <fieldset disabled={!!batchTask} className="contents">
-      {/* ヘッダー */}
-      <div className="bg-gray-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-20">
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-black tracking-wide">地方競馬AI予想帳</span>
-          <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">地方競馬全15場対応版 v12.9.0・大井専用モデル／起動修正2</span>
-        </div>
-        {status && <span className="text-xs bg-green-600 px-2 py-1 rounded">{status}</span>}
-      </div>
-
-      <div className="sticky top-[52px] z-10 border-b border-gray-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center gap-2 overflow-x-auto">
-          {[
-            ["race-section","① レース"],
-            ["input-section","② 入力"],
-            ["result-section","③ 予想"],
-            ["horses-section","④ 全頭"],
-          ].map(([id,label])=><button key={id} onClick={()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"})} className="shrink-0 rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-[11px] font-black text-gray-700 active:bg-gray-200">{label}</button>)}
-          <button onClick={()=>{setHorseDbOpen(true); setTimeout(()=>document.getElementById("horse-db-section")?.scrollIntoView({behavior:"smooth",block:"start"}),0)}} className="shrink-0 rounded-full border border-violet-200 bg-violet-50 px-3 py-1.5 text-[11px] font-black text-violet-700">⑤ 馬DB</button>
-          <div className="ml-auto shrink-0 text-[10px] font-bold text-gray-400">{track}{raceNo}R {distance?`${distance}m`:""}</div>
-        </div>
-      </div>
-
+      <header className="workspace-header"><div className="workspace-header-inner"><div className="workspace-brand"><span className="brand-emblem" aria-hidden="true">N</span><div><b>NAR <span>NOTE</span></b><small>地方競馬AI予想帳</small></div></div><span className="header-personal">PERSONAL RACING JOURNAL</span>{status&&<span role="status" className="header-status">{status}</span>}</div></header>
+      <nav className="workspace-nav" aria-label="メインメニュー"><div><button aria-current={workspaceView==='race'?'page':undefined} onClick={()=>{setWorkspaceView('race');window.scrollTo({top:0,behavior:'smooth'});}}>今日の予想</button><button aria-current={workspaceView==='performance'?'page':undefined} onClick={()=>{setWorkspaceView('performance');window.scrollTo({top:0,behavior:'smooth'});}}>成績を見る</button><button onClick={()=>{setWorkspaceView('race');setTimeout(()=>document.getElementById('import-section')?.scrollIntoView({behavior:'smooth'}),0);}}>データ読込</button><button onClick={()=>{setWorkspaceView('race');setSavedRacesOpen(true);setTimeout(()=>document.getElementById('saved-section')?.scrollIntoView({behavior:'smooth'}),0);}}>保存データ</button></div></nav>
+      {workspaceView==='performance'&&<Suspense fallback={<div className="dashboard-loading" role="status">成績を集計しています…</div>}><PerformanceDashboard records={savedRaces} onBack={()=>setWorkspaceView('race')}/></Suspense>}
+      <section className="race-workspace" hidden={workspaceView!=='race'}>
+      <div className="race-intro"><div><span className="eyebrow">TODAY'S RACE / 予想ノート</span><h1>今日の予想</h1><p>{raceDate||'開催日を選択'} <span>／</span> {track} {raceNo}R {distance&&`${distance}m`}</p></div><button className="insight-link" onClick={()=>{setWorkspaceView('performance');window.scrollTo({top:0,behavior:'smooth'});}}>会場・距離の得意を探す <span>↗</span></button></div>
+      <div className="race-shortcuts" aria-label="予想画面の移動">{[['race-section','レース設定'],['input-section','テキスト入力'],['result-section','予想'],['horses-section','全頭一覧']].map(([id,label])=><button key={id} onClick={()=>document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'})}>{label}</button>)}<span>{horses.length}頭を比較</span></div>
       {isDeploymentUrl && (
         <div className="mx-3 mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
           <div className="font-black">⚠ このURLはDeployment固有URLです</div>
@@ -3617,6 +3603,7 @@ export default function NARPredictionTool() {
       <details className="mx-3 mt-3 rounded-xl border bg-white p-3"><summary className="text-xs font-bold">指数の根拠・転入回数（分かる項目だけ）</summary><div className="text-[11px] mt-2">実測回数・最高指数の日付を記録。転入回数が不明なら直近5走からの推定と表示します。空欄を埋める必要はありません。</div><div className="overflow-x-auto"><table className="text-xs"><thead><tr><th>馬番・馬名</th><th>最高指数の日付</th><th>最高の馬場</th><th>距離実測本数</th><th>コース実測本数</th><th>転入後地方出走数</th><th>出走状態</th></tr></thead><tbody>{horses.map(h=><tr key={h.id}><td className="p-2 whitespace-nowrap">{h.umaban} {h.name}</td><td><input type="date" className="border p-1" value={h.bestDate||''} onChange={e=>updateHorse(h.id,'bestDate',e.target.value)}/></td><td><select className="border p-1" value={h.bestSurface||''} onChange={e=>updateHorse(h.id,'bestSurface',e.target.value)}><option value="">未確認</option><option>ダート</option><option>芝</option></select></td>{['distSamples','courseSamples','narStartsSinceTransfer'].map(key=><td key={key}><input className="border p-1 w-16" inputMode="numeric" value={h[key]??''} onChange={e=>updateHorse(h.id,key,e.target.value)}/></td>)}<td><select className="border p-1" value={h.raceStatus||''} onChange={e=>updateHorse(h.id,'raceStatus',e.target.value)}><option value="">出走予定</option><option>取消</option><option>除外</option></select></td></tr>)}</tbody></table></div></details>
 
       <details className="mx-3 mt-3 rounded-xl border bg-white p-3 text-xs"><summary className="font-bold">入力の根拠・不確実性を確認</summary><p className="mt-2">馬体重・増減は採点対象外。自動学習は同版・発走前固定済みの結果のみ。旧記録は保持し、係数は新しい版で1.0から検証します。</p><p className="mt-1">クラス：{raceClass||'未確認'}／新しい版の学習対象：{learningRaces.length}R。品質点は入力の充足で、的中確率ではありません。</p>{horses.filter(h=>!nonStarter(h)).map(h=><div key={h.id} className="border-t mt-2 pt-2"><strong>{h.umaban} {h.name}</strong><p>{uncertainty(h,{raceDate,scheduledStart,distance,surface,raceClass}).join('／')||'追加の不足表示なし（好走保証ではありません）'}</p></div>)}</details>
+      <div id="import-section" className="section-marker"><span className="eyebrow">IMPORT & REVIEW</span><h2>データの読み込み</h2></div>
       <BatchImportPanel records={savedRaces} inbox={batchInbox} onImport={data=>{setBatchInbox(data);setBatchSummary(null);}} onOpen={applySourceDraft} onRun={startBatchPrediction} ready={loaded&&storageReady&&!batchTask} summary={batchSummary} />
       <ModelComparisonPanel records={savedRaces} />
       <WeightLabPanel records={savedRaces} current={weights} onApply={(w:any)=>setWeights(w)} />
@@ -4013,7 +4000,7 @@ export default function NARPredictionTool() {
       <div className="mx-3 mt-3 rounded-xl border border-indigo-200 bg-white p-3 shadow-sm">
         <div className="flex flex-wrap gap-2 border-b pb-2">
           <button onClick={()=>setAnalysisTab("review")} className={`rounded px-3 py-1.5 text-xs font-black ${analysisTab==='review'?'bg-indigo-700 text-white':'bg-gray-100'}`}>AI自動回顧</button>
-          <button onClick={()=>setAnalysisTab("conditions")} className={`rounded px-3 py-1.5 text-xs font-black ${analysisTab==='conditions'?'bg-indigo-700 text-white':'bg-gray-100'}`}>条件別成績</button>
+          <button onClick={()=>{setWorkspaceView("performance");window.scrollTo({top:0,behavior:"smooth"});}} className={`rounded px-3 py-1.5 text-xs font-black ${analysisTab==='conditions'?'bg-indigo-700 text-white':'bg-gray-100'}`}>条件別成績</button>
           <button onClick={()=>setAnalysisTab("backtest")} className={`rounded px-3 py-1.5 text-xs font-black ${analysisTab==='backtest'?'bg-indigo-700 text-white':'bg-gray-100'}`}>バックテスト</button>
         </div>
         {analysisTab==='review' && <div className="mt-3 text-xs text-gray-700">結果保存時に自動回顧を生成します。保存済みレースの「AI回顧」から、見逃した好走馬・過大評価した本命・改善候補を確認できます。</div>}
@@ -4089,7 +4076,7 @@ export default function NARPredictionTool() {
       )}
 
       {savedRacesOpen && (
-        <div className="mx-3 mt-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+        <div id="saved-section" className="mx-3 mt-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <div>
               <div className="font-black text-slate-800">保存済みレース</div>
@@ -4158,7 +4145,9 @@ export default function NARPredictionTool() {
       )}
 
       </div>
+      </section>
       </fieldset>
+      <footer className="workspace-footer"><span>NAR NOTE</span><p>予想と結果を記録して、自分の得意を知る。</p><button onClick={()=>window.scrollTo({top:0,behavior:"smooth"})}>先頭へ ↑</button></footer>
       {batchTask&&<div role="status" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="rounded-xl bg-white p-5 text-sm"><p>一括予想・保存中 {batchTask.index+1} / {batchTask.drafts.length}</p><p className="mt-2">完了まで画面を開いたままにしてください。</p><button onClick={()=>{batchCancel.current=true;}} className="mt-3 rounded border px-4 py-2">現在の保存後に中止</button></div></div>}
     </div>
   );

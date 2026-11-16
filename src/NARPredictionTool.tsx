@@ -1,3 +1,5 @@
+import HorseInsightCard from './HorseInsightCard';
+import {historyIndex} from './horseInsights';
 import {nagoyaHeadRecent,sonodaAuxInputs} from './venueEvaluation';
 import {oiModel,OI_MODEL_BUILD} from './oiModel';
 import OiModelPanel from './OiModelPanel';
@@ -2006,6 +2008,7 @@ export default function NARPredictionTool() {
     flash("Azure解析JSONを書き出しました");
   };
 
+  const horseInsightIndex = useMemo(() => historyIndex(savedRaces), [savedRaces]);
   // ---- 馬データベース（保存済みレースから自動生成） ----
   // 別ストレージへ複製せず nar-saved-races を正本にするため、既存バックアップとの互換性を保つ。
   const normalizeHorseDbName = (v:any) => String(v || "").replace(/[\s　]+/g, "").trim();
@@ -3741,6 +3744,7 @@ export default function NARPredictionTool() {
         <button onClick={()=>document.getElementById("result-section")?.scrollIntoView({behavior:"smooth",block:"start"})} className="shrink-0 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-[10px] font-black text-indigo-700">予想へ戻る</button>
       </div>
       <div id="horses-section" className="scroll-mt-28" />
+      <details className="mx-3 mt-3 hidden rounded-xl border border-stone-200 bg-white p-3 sm:block"><summary className="cursor-pointer text-sm font-bold">各馬の蓄積成績（会場・距離・休み明け）</summary><div className="mt-3 grid grid-cols-2 gap-3">{ranked.map(h=><div key={`insight-${h.id}`}><h3 className="mb-1 text-sm font-bold">{h.umaban} {h.name}</h3><HorseInsightCard index={horseInsightIndex} horse={h} meta={{raceDate,track,distance,surface}} /></div>)}</div></details>
       <div className="mx-3 mt-3 space-y-2 sm:hidden">
         {ranked
           .slice()
@@ -3768,6 +3772,7 @@ export default function NARPredictionTool() {
                 </div>
               </summary>
               <div className="border-t border-slate-100 p-3">
+                <div className="mb-3"><HorseInsightCard index={horseInsightIndex} horse={h} meta={{raceDate,track,distance,surface}} /></div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <label className="rounded-lg bg-slate-50 p-2"><span className="block text-[9px] font-bold text-slate-400">馬名</span><input value={h.name||""} onChange={(e)=>updateHorse(h.id,"name",e.target.value)} className="mt-1 w-full bg-transparent font-bold outline-none" placeholder="馬名" /></label>
                   <label className="rounded-lg bg-slate-50 p-2"><span className="block text-[9px] font-bold text-slate-400">印</span><select value={h.mark||""} onChange={(e)=>updateHorse(h.id,"mark",e.target.value)} className="mt-1 w-full bg-transparent font-black text-red-600 outline-none"><option value="">{h._autoMark||"—"}</option>{["◎","○","▲","△","☆","消"].map((m)=><option key={m} value={m}>{m}</option>)}</select></label>

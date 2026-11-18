@@ -45,7 +45,7 @@ const NAR_TRACKS = ["帯広", "門別", "盛岡", "水沢", "浦和", "船橋", 
 const GOINGS = ["未確認", "良", "稍重", "重", "不良"];
 const RUNNING_STYLES = ["", "逃", "先", "差", "追", "自在"];
 const JRA_TRACKS = ["札幌","函館","福島","新潟","東京","中山","中京","京都","阪神","小倉"];
-const COMMENT_TRAINING_TRACKS = ["浦和","船橋","大井","川崎","門別"];
+const COMMENT_TRAINING_TRACKS = ["浦和","船橋","大井","川崎","門別","園田"];
 
 // 会場・距離の表記揺れを吸収して、全機能で「同場同距離」を同じ基準で判定する。
 const normalizeDigits = (v:any) => String(v ?? "").replace(/[０-９]/g, (d)=>String(d.charCodeAt(0)-0xFEE0));
@@ -564,8 +564,8 @@ export default function NARPredictionTool() {
     ["form", "出馬表（詳細）", "脚質・通過順・休養・騎手変更・同場同距離実績を自動判定"],
     ["standard", "タイム指数（標準）", "全体最高・5走平均・距離・コース・3走・2走・前走"],
     ["recent", "タイム指数（近5走）", "会場・距離・ペース・指数（同場同距離を最重視）"],
-    ["training", "調教評価", "南関・門別のみ任意。空欄でも予想可能"],
-    ["comment", "厩舎コメント", "南関・門別のみ任意。空欄でも予想可能"],
+    ["training", "調教評価", "南関・門別・園田のみ任意。空欄でも予想可能"],
+    ["comment", "厩舎コメント", "南関・門別・園田のみ任意。空欄でも予想可能"],
   ];
 
   const selectScanFile = (type, file) => {
@@ -2612,7 +2612,7 @@ export default function NARPredictionTool() {
         }
       }
 
-      // 南関4場+門別だけコメント/調教を補助評価。未入力なら完全に0点（減点もしない）。
+      // 南関4場+門別+園田でコメント/調教を補助評価。未入力なら完全に0点（減点もしない）。
       const canUseComments = COMMENT_TRAINING_TRACKS.includes(track);
       const hasTraining = canUseComments && observed(h,'trainingScore')!==null;
       const hasComment = canUseComments && !!String(h.comment || "").trim();
@@ -3646,7 +3646,7 @@ export default function NARPredictionTool() {
             <button onClick={()=>applyScanTexts(true)} className="rounded-xl bg-indigo-700 px-4 py-3 text-sm font-black text-white shadow">反映して予想へ</button>
             <button onClick={clearAllScanText} className="rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600">入力をクリア</button>
           </div>
-          <div className="mt-2 text-[10px] leading-relaxed text-gray-500">上の順番で必要なデータだけ貼ればOK。調教評価・厩舎コメントは南関・門別のみ表示され、空欄でも予想できます。</div>
+          <div className="mt-2 text-[10px] leading-relaxed text-gray-500">上の順番で必要なデータだけ貼ればOK。調教評価・厩舎コメントは南関・門別・園田のみ表示され、空欄でも予想できます。</div>
         </div>}
       </div>
 

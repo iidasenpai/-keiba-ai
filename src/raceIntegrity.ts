@@ -1,3 +1,4 @@
+import {OI_PEAK_VERSION,OI_PEAK_RULE} from './oiPeakCandidate';
 import {NAGOYA_MIX_VERSION,SONODA_AUX_VERSION} from './venueEvaluation';
 import {venueCandidate} from './venueCandidate';
 import {OI_MODEL_BUILD,OI_MODEL_VERSION} from './oiModel';
@@ -65,6 +66,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
   return { ...clone(metadata), schemaVersion: 2, lockedAt: now, modelVersion: MODEL_VERSION, build:metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?OI_MODEL_BUILD:MODEL_BUILD, horses: clone(current), models: {
     current: rows(orderedPrediction(current)),
     ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?{OiModel:{version:OI_MODEL_VERSION,predictions:rows(orderedPrediction(current)),diagnostics:current.map(h=>({umaban:h.umaban,...h.oiEvidence}))}}:{}),
+    ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))&&Array.isArray(candidates.OiPeak3)?{OiPeak3:{version:OI_PEAK_VERSION,rule:OI_PEAK_RULE,predictions:rows(orderedPrediction(candidates.OiPeak3)),diagnostics:candidates.OiPeak3.map((h:any)=>({umaban:h.umaban,...h.oiPeakEvidence}))}}:{}),
     ...(metadata.track==='大井'&&Array.isArray(candidates.OiBaseline)?{OiBaseline:{version:'oi-baseline-v1',rule:'同時保存した共通入力の従来計算。専用版と同じ学習履歴の範囲を参照。',predictions:rows(orderedPrediction(candidates.OiBaseline))}}:{}),
     ...(metadata.track==='名古屋'&&Array.isArray(candidates.NagoyaHeadRecent)?{NagoyaHeadRecent:{version:NAGOYA_MIX_VERSION,rule:'現行◎を固定し、残りを近走指数順で選ぶ。未採用の比較候補。',predictions:rows(orderedPrediction(candidates.NagoyaHeadRecent))}}:{}),
     ...(metadata.track==='園田'&&Array.isArray(candidates.SonodaAux)?{SonodaAux:{version:SONODA_AUX_VERSION,rule:'園田の今回分の取得証拠がある調教±1・コメント±0.5。未採用。',predictions:rows(orderedPrediction(candidates.SonodaAux)),diagnostics:candidates.SonodaAux.map(h=>({umaban:h.umaban,...h.sonodaAuxEvidence}))}}:{}),

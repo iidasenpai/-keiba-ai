@@ -1,3 +1,5 @@
+import OiPeakComparison from './OiPeakComparison';
+import {OI_MODEL_BUILD} from './oiModel';
 import {useMemo,useState} from 'react';
 import {verifiedBeforeStart,nonStarter,finite} from './modelSafety';
 import {resultIssues} from './raceIntegrity';
@@ -48,6 +50,7 @@ function ComparisonContent({records}:{records:any[]}){
   <div className="mt-3 rounded border p-2"><strong>近走85候補の事前検証</strong><p>現行と候補を同時に固定した{candidate.comparable}R。結果後の再計算は含めません。</p>{Object.entries(candidate.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭 {pct(t.top5,t.n)}</p>)}<p>候補は次の新規保存から記録。本命・印は現行を使用し、自動採用しません。候補の補助点は合計±2点、馬体重・人気・騎手・順位学習の上乗せは0です。</p></div>
   <div className="mt-3 rounded border p-2"><strong>調教補正あり・なしの比較</strong><p>発走前に両方を保存した共通{training.comparable}R。主予想は従来のままです。</p>{Object.entries(training.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭 {pct(t.top5,t.n)}／上位6頭 {pct(t.top6,t.n)}</p>)}<p>調教未取得の過去予想に候補は後付けしません。</p></div>
   <div className="mt-3 rounded border p-2"><strong>大井専用モデルの成績</strong><p>主予想は大井専用モデル。従来方式も同時保存した共通{oi.comparable}R。</p>{Object.entries(oi.totals).map(([k,t])=><p key={k}>{k==='current'?'大井専用モデル':label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}／上位5頭 {pct(t.top5,t.n)}／上位6頭 {pct(t.top6,t.n)}</p>)}<p>過去の旧データをこの事前成績に混ぜません。</p></div>
+  <OiPeakComparison records={records} date={date} options={{...options,build:buildChosen==='latest'?OI_MODEL_BUILD:build}}/>
   <details className="mt-2"><summary>近走70候補の比較</summary>{Object.entries(balanced.totals).map(([k,t])=><p key={k}>{label[k]}：勝利 {pct(t.win,t.n)}／3着内 {pct(t.place,t.n)}</p>)}</details>
   <p className="mt-2 text-amber-900">的中状況の比較で、回収率ではありません。未見の開催で検証し、少数結果だけで係数を採用しません。</p>
  </>;

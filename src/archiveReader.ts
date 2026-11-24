@@ -1,3 +1,4 @@
+import {archiveCompressedBytes,shareArchiveEvidence} from './archiveMemory';
 // Parse an archive array incrementally. Keep only one record's JSON text at a
 // time, rather than a second, fully decompressed copy of the entire archive.
 export class ArchiveArrayReader {
@@ -16,7 +17,7 @@ export class ArchiveArrayReader {
       if (last && this.count===0) return;
       throw new Error('保存レースのJSON配列が不正です');
     }
-    this.rows.push(JSON.parse(text));
+    this.rows.push(shareArchiveEvidence(JSON.parse(text)));
     this.count++;
   }
   feed(chunk:string) {
@@ -69,13 +70,8 @@ export async function decodeArchiveStream(text:string):Promise<any[]> {
     for(let i=0;i<text.length;i+=65536){parser.feed(text.slice(i,i+65536));if(i%1048576===0)await yieldToBrowser();}
     return parser.finish();
   }
-  const data=JSON.parse(text);
-  if(data?.encoding!=='nar-gzip-v1'||typeof data.data!=='string'||typeof DecompressionStream==='undefined')throw new Error('保存形式を読み込めません。この端末のブラウザを更新してください');
-  // Avoid Uint8Array.from(string, callback), which creates large iterator
-  // intermediates for a base64 archive on mobile browsers.
-  const binary=atob(data.data),bytes=new Uint8Array(binary.length);
-  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
-  const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  if(typeof DecompressionStream==='undefined')throw new Error('保存形式を読み込めません。この端末のブラウザを更新してください');
+  const reader=archiveCompressedBytes(text).pipeThrough(new DecompressionStream('gzip')).getReader();
   const decoder=new TextDecoder();
   let sinceYield=0;
   try {

@@ -295,6 +295,7 @@ export default function NARPredictionTool() {
         if (cancelled) return;
         if (saved && saved.value) {
           const items = await decodeArchive(saved.value);
+          if (cancelled) return;
           if (Array.isArray(items) && items.length) {
             // Preserve historical objects byte-for-byte in meaning; no silent factor migration.
             const normalized = items;

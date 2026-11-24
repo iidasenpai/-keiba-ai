@@ -1,7 +1,7 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
 import {listRescueEntries,readRescueEntry,rawRescueBlob} from './rescueStorage';
 
-afterEach(()=>vi.unstubAllGlobals());
+afterEach(()=>{ vi.unstubAllGlobals(); });
 function storedFixture(values:Record<string,string>) {
   const modes:string[]=[];
   const close=vi.fn();

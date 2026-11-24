@@ -7,7 +7,20 @@
     <title>地方競馬AI</title>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="root">
+      <main style="max-width:36rem;margin:12vh auto;padding:24px;font-family:system-ui,sans-serif;color:#17212b;line-height:1.8">
+        <h1 style="font-size:24px">地方競馬AI</h1>
+        <p>保存レースは、下のボタンを押してから読み込みます。</p>
+        <button id="start-app" style="padding:14px 20px;font-size:16px">アプリを開く</button>
+        <h2 style="font-size:18px;margin-top:32px">起動すると落ちる場合</h2>
+        <p>全レースを展開せず、保存されているデータをそのまま書き出せます。元のデータは変更しません。</p>
+        <button id="rescue-data" style="padding:12px 16px;font-size:16px">保存データの救出</button>
+        <div id="rescue-files"></div>
+        <p id="startup-status" role="status" aria-live="polite"></p>
+        <p style="font-size:13px">起動保護版 2026-11-24</p>
+        <noscript>JavaScriptを有効にして開いてください。</noscript>
+      </main>
+    </div>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

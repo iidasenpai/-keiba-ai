@@ -38,10 +38,10 @@ export function archiveCompressedBytes(text:string):ReadableStream<Uint8Array> {
   // Fast path for the existing encodeArchive format, without JSON.parse making
   // another 51 MB copy of its base64 data string. Other valid envelopes retain
   // the old general parser for compatibility.
-  const head=/^\s*\{\s*"encoding"\s*:\s*"nar-gzip-v1"\s*,\s*"data"\s*:\s*"/.exec(text);
+  const head=/^\s*\{\s*"encoding"\s*:\s*"(?:nar-gzip-v1|nar-gzip-shared-v2)"\s*,\s*"data"\s*:\s*"/.exec(text);
   const tail=/"\s*\}\s*$/.exec(text);
   if(head&&tail&&tail.index>=head[0].length)return base64ByteStream(text,head[0].length,tail.index);
   const data=JSON.parse(text);
-  if(data?.encoding!=='nar-gzip-v1'||typeof data.data!=='string')throw new Error('保存形式を読み込めません');
+  if(!['nar-gzip-v1','nar-gzip-shared-v2'].includes(data?.encoding)||typeof data.data!=='string')throw new Error('保存形式を読み込めません');
   return base64ByteStream(data.data);
 }

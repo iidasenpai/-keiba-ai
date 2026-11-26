@@ -1,3 +1,4 @@
+import {packArchiveRecord} from './archivePacking';
 import {commentScore} from './assessments';
 // v12: pure scoring, evidence and archive helpers. Historical records are never migrated in place.
 export const MODEL_VERSION = 'nar-safe-v12.7';
@@ -55,7 +56,7 @@ export function fieldAudit(horses:any[]) {
   const unknown=active.filter(h=>finite(h._base)===null);
   const unnamed=active.filter(h=>!String(h.name||'').trim());
   const dist=active.filter(h=>measured(h,'dist')).length, course=active.filter(h=>measured(h,'course')).length;
-  const recent=active.filter(h=>(h._recentMeta?.usableCount??h._recentMeta?.runs?.length??0)>0||finite(h.avg5)!==null).length;
+  const recent=active.filter(h=>(h._recentMeta?.usableCount??h._recentMeta?.runs?.length??h._recentMeta?.archivedRunCount??0)>0||finite(h.avg5)!==null).length;
   const core=active.length-unknown.length;
   const total=active.length||1;
   const form=active.filter(h=>Array.isArray(h.recentPositions)&&h.recentPositions.length>0).length;
@@ -209,10 +210,10 @@ export async function encodeArchive(records:any[]) {
   let index=-1;
   const source=new ReadableStream<Uint8Array>({pull(controller){
     if(index===-1){controller.enqueue(encoder.encode('['));index=0;return;}
-    if(index<records.length){const row=JSON.stringify(records[index])??'null';controller.enqueue(encoder.encode((index?',':'')+row));index++;return;}
+    if(index<records.length){const row=JSON.stringify(packArchiveRecord(records[index]));controller.enqueue(encoder.encode((index?',':'')+row));index++;return;}
     controller.enqueue(encoder.encode(']'));controller.close();
   }});
   const zipped=await new Response(source.pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
-  return JSON.stringify({encoding:'nar-gzip-v1',data:base64(new Uint8Array(zipped))});
+  return JSON.stringify({encoding:'nar-gzip-shared-v2',data:base64(new Uint8Array(zipped))});
 }
 export { decodeArchiveStream as decodeArchive } from './archiveReader';

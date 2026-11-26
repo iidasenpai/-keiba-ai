@@ -1,3 +1,5 @@
+import HistoryDetailPanel from './HistoryDetailPanel';
+import {applyDetailZip} from './historyDetailActions';
 import {oiPeakCandidate} from './oiPeakCandidate';
 import HorseInsightCard from './HorseInsightCard';
 import {historyIndex} from './horseInsights';
@@ -222,6 +224,7 @@ export default function NARPredictionTool() {
   const [flowFocusId, setFlowFocusId] = useState<string>("");
   const [horseDbOpen, setHorseDbOpen] = useState(false);
   const [analysisOpen,setAnalysisOpen] = useState(false);
+  const [savedPage, setSavedPage] = useState(0);
   const [horseDbQuery, setHorseDbQuery] = useState("");
   const [horseDbSelected, setHorseDbSelected] = useState<string>("");
 
@@ -3358,6 +3361,17 @@ export default function NARPredictionTool() {
     flash(forResult ? "保存済みレースを読み込みました。1着-2着-3着の馬番を入力してください" : "保存済みレースを読み込みました");
   };
 
+  const applyHistoryDetails = async (zip:any, restore:boolean) => {
+    if (automaticSave.current) await automaticSave.current;
+    if (!storageReady || committing.current) throw new Error('保存処理中です。完了後に再試行してください');
+    committing.current = true;
+    try {
+      const next = await applyDetailZip(live.current.savedRaces, zip, restore);
+      if (next.count) { await persist(next.records); setSavedRaces(next.records); }
+      return next.count;
+    } finally { committing.current = false; }
+  };
+
   const deleteSavedRace = async (_id: string) => {
     flash('既存レースの保護を有効にしています。レースは削除されません');
   };
@@ -4098,11 +4112,13 @@ export default function NARPredictionTool() {
             </div>
             <button onClick={() => setSavedRacesOpen(false)} className="text-xs text-slate-400">閉じる</button>
           </div>
+          <HistoryDetailPanel records={savedRaces} onApply={applyHistoryDetails}/>
+          {savedRaces.length>50&&<div className="mb-2 flex items-center justify-between text-xs"><button disabled={savedPage===0} onClick={()=>setSavedPage(p=>Math.max(0,p-1))}>前へ</button><span>{Math.min(savedPage,Math.max(0,Math.ceil(savedRaces.length/50)-1))+1} / {Math.ceil(savedRaces.length/50)}ページ（各50件）</span><button disabled={(savedPage+1)*50>=savedRaces.length} onClick={()=>setSavedPage(p=>p+1)}>次へ</button></div>}
           {savedRaces.length === 0 ? (
             <div className="rounded bg-slate-50 p-4 text-center text-xs text-slate-400">保存済みレースはありません。</div>
           ) : (
             <div className="space-y-2">
-              {savedRaces.map((race) => (
+              {savedRaces.slice(Math.min(savedPage,Math.max(0,Math.ceil(savedRaces.length/50)-1))*50,(Math.min(savedPage,Math.max(0,Math.ceil(savedRaces.length/50)-1))+1)*50).map((race) => (
                 <div key={race.id} className="rounded-lg border border-slate-200 p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">

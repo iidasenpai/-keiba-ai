@@ -1,7 +1,9 @@
+import {unpackArchiveRecord} from './archivePacking';
 import {archiveCompressedBytes,shareArchiveEvidence} from './archiveMemory';
 // Parse an archive array incrementally. Keep only one record's JSON text at a
 // time, rather than a second, fully decompressed copy of the entire archive.
 export class ArchiveArrayReader {
+  constructor(private shared=false) {}
   private started=false;
   private ended=false;
   private quoted=false;
@@ -17,7 +19,7 @@ export class ArchiveArrayReader {
       if (last && this.count===0) return;
       throw new Error('保存レースのJSON配列が不正です');
     }
-    this.rows.push(shareArchiveEvidence(JSON.parse(text)));
+    this.rows.push(this.shared?unpackArchiveRecord(JSON.parse(text)):shareArchiveEvidence(JSON.parse(text)));
     this.count++;
   }
   feed(chunk:string) {
@@ -65,7 +67,8 @@ export class ArchiveArrayReader {
 // collect temporary buffers. This does not change record order or contents.
 const yieldToBrowser=()=>new Promise<void>(resolve=>setTimeout(resolve,0));
 export async function decodeArchiveStream(text:string):Promise<any[]> {
-  const parser=new ArchiveArrayReader();
+  const shared=text.trimStart().startsWith('{')&&/"encoding"\s*:\s*"nar-gzip-shared-v2"/.test(text.slice(0,256)+text.slice(-256));
+  const parser=new ArchiveArrayReader(shared);
   if(text.trimStart().startsWith('[')) {
     for(let i=0;i<text.length;i+=65536){parser.feed(text.slice(i,i+65536));if(i%1048576===0)await yieldToBrowser();}
     return parser.finish();

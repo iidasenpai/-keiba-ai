@@ -3,7 +3,7 @@ import {eventKey,finite,nonStarter,raceInstant} from './modelSafety';
 const supplemental=['浦和','船橋','大井','川崎','門別'];
 const normalize=(s:any)=>String(s||'').normalize('NFKC').replace(/[\s・･]/g,'');
 export function sourceFingerprint(d:any){
- const text=JSON.stringify(Object.keys(d.sources).sort().map(k=>{const p=d.sources[k];return [k,p.meta,p.roster,p.rows,p.text,p.paceText||''];}));
+ const text=JSON.stringify(Object.keys(d.sources).sort().map(k=>{const p=d.sources[k];const base=[k,p.meta,p.roster,p.rows,p.text,p.paceText||''];return p.market?[...base,p.market]:base;}));
  let a=2166136261,b=5381;for(let i=0;i<text.length;i++){a=Math.imul(a^text.charCodeAt(i),16777619)>>>0;b=(Math.imul(b,33)^text.charCodeAt(i))>>>0;}
  return text.length+':'+a.toString(16)+':'+b.toString(16);
 }
@@ -20,7 +20,7 @@ export function planDraftUpdate(records:any[],d:any,now=Date.now()){
  if(record.sourceRaceId!==d.sourceRaceId||String(record.distance)!==d.meta.distance||record.scheduledStart!==start||(record.surface||'ダート')!==(d.meta.surface||'ダート'))return stop('元レース・距離・発走時刻・馬場種別が一致しません');
  const roster=xs=>xs.map(h=>String(h.umaban)+'|'+normalize(h.name)).sort().join('\n');
  if(roster(record.predictionLock.horses)!==roster(d.sources.race.roster))return stop('保存予想と馬番・馬名が一致しません');
- const old=record.predictionLock,oldKinds=new Set(old.horses.flatMap(h=>(h.inputSources||[]).map(p=>p.kind)));
+ const old=record.predictionLock,oldKinds=new Set(old.horses.flatMap(h=>(h.inputSources||[]).map(p=>p.kind)).filter(k=>k!=='market'));
  if(old.horses.some(h=>finite(h.trainingScore)!==null))oldKinds.add('training');
  if(old.horses.some(h=>String(h.comment||'').trim()))oldKinds.add('comment');
  if([...oldKinds].some(k=>!d.sources[String(k)]))return stop('保存予想より取得項目が減るため更新しません');
@@ -31,7 +31,7 @@ export function planDraftUpdate(records:any[],d:any,now=Date.now()){
  const key=sourceFingerprint(d);
  if(old.sourceFingerprint===key)return stop('同じ入力で保存済みです');
  if(!old.sourceFingerprint){
-  const times=old.horses.flatMap(h=>(h.inputSources||[]).map(p=>Date.parse(p.capturedAt))).filter(Number.isFinite);
+  const times=old.horses.flatMap(h=>(h.inputSources||[]).filter(p=>p.kind!=='market').map(p=>Date.parse(p.capturedAt))).filter(Number.isFinite);
   const latest=Math.max(0,...times),newest=Math.max(...Object.values(d.sources).map((p:any)=>Date.parse(p.capturedAt)));
   if(newest<=latest&&Object.keys(d.sources).every(k=>oldKinds.has(k)))return stop('保存予想より新しい入力はありません');
  }

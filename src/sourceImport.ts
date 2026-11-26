@@ -1,5 +1,6 @@
 import {validateStructuredTraining} from './structuredTraining';
 import {sourceDetailIssues,raceClassFromName} from './evidenceReview';
+import {buildMarketSnapshot,marketText} from './marketSnapshot';
 // Source files are untrusted input. Validate the complete batch before editing a draft.
 const KINDS=['race','form','standard','recent','training','comment'];
 const TRACKS=['帯広','門別','盛岡','水沢','浦和','船橋','大井','川崎','金沢','笠松','名古屋','園田','姫路','高知','佐賀'];
@@ -41,10 +42,11 @@ export function prepareSources(bundles:any[]) {
    const day=m.raceDate.replaceAll('-','');if('trainingDate' in link){if(link.trainingDate!==m.raceDate||link.trainingRaceNo!==m.raceNo||link.trainingTrack!==m.track)throw Error('調教PDFの開催日・会場・Rが一致しません');}else if(day.slice(0,4)!==link.id.slice(0,4)||(link.u.hostname==='nar.sp.netkeiba.com'?(link.id.slice(6,10)!==day.slice(4)||Number(link.id.slice(-2))!==Number(m.raceNo)):link.id.slice(-4)!==day.slice(4)))throw Error('開催日・Rと参照元IDが違います');
    if(!Number.isFinite(Date.parse(p.capturedAt))||Date.parse(p.capturedAt)>Date.now()+300000)throw Error('取得日時が不正です');
    str(p.text);if(p.paceText!==undefined)str(p.paceText);str(p.capturedAt,40);if(!Array.isArray(p.roster)||p.roster.length<1||p.roster.length>18||!Array.isArray(p.rows)||p.rows.length!==p.roster.length)throw Error('出走馬一覧が不正です');
+    if(p.market!==undefined&&p.market!==null){if(p.kind!=='race'||typeof p.market!=='object'||Array.isArray(p.market))throw Error('市場情報はnetkeiba出馬表にだけ付けられます');for(const k of ['capturedAt','siteUpdatedAt']){const v=p.market[k];if(v!==undefined&&v!==null&&(typeof v!=='string'||!Number.isFinite(Date.parse(v))))throw Error('市場情報の時刻が不正です');}if(p.market.capturedAt&&Date.parse(p.market.capturedAt)>Date.now()+300000)throw Error('市場情報の取得日時が不正です');for(const k of ['source','missingReason']){const v=p.market[k];if(v!==undefined&&v!==null)str(v,200);}}
    const nos=new Set();for(const [i,h] of p.roster.entries()){
     if(!/^(?:[1-9]|1[0-8])$/.test(h.umaban)||!str(h.name,40).trim()||nos.has(h.umaban))throw Error('馬番・馬名の重複または欠落があります');nos.add(h.umaban);
     if(p.rows[i].umaban!==h.umaban||tidy(p.rows[i].name)!==tidy(h.name))throw Error('行データと馬一覧が一致しません');
-    if(p.kind==='race')for(const k of ['sex','jockey','weight','odds','ninki','bodyChange','raceStatus'])if(p.rows[i][k]!==undefined)str(p.rows[i][k],100);
+    if(p.kind==='race'){for(const k of ['sex','jockey','weight','bodyChange','raceStatus'])if(p.rows[i][k]!==undefined)str(p.rows[i][k],100);for(const k of ['odds','ninki']){const v=p.rows[i][k];if(v!==undefined&&v!==null&&!(typeof v==='number'&&Number.isFinite(v)))str(v,100);}const mr=p.rows[i].oddsMissingReason;if(mr!==undefined&&mr!==null)str(mr,200);}
     if(['standard','recent'].includes(p.kind)){
      const c=p.rows[i].cells;if(!Array.isArray(c)||c.length!==(p.kind==='standard'?15:12)||c.some(v=>typeof v!=='string'||v.length>200)||c[0]!==h.umaban||tidy(c[2])!==tidy(h.name))throw Error('指数表の列数・馬情報が変わっています');
      const row=p.rows[i];
@@ -67,7 +69,7 @@ export function prepareSources(bundles:any[]) {
     }
    }
    if(sources[p.kind])throw Error(`${p.kind}が重複しています。古いファイルを外してください`);
-   sources[p.kind]=p;
+   sources[p.kind]=p.kind==='race'?{...p,rows:p.rows.map((r:any)=>({...r,odds:marketText(r.odds),ninki:marketText(r.ninki)}))}:p;
   }
  }
  if(!sources.race)throw Error('netkeiba出馬表の取得が必要です');
@@ -81,7 +83,8 @@ export function prepareSources(bundles:any[]) {
  if(sources.training&&['uma-katsu.net','www.kanazawakeiba-yoso.com'].includes(new URL(sources.training.url).hostname)&&sources.training.representation!=='structured-workouts-v1')throw Error('調教PDFは構造化記録として取り込んでください');
  const absent=KINDS.filter(k=>!sources[k]);
  const detailIssues=sourceDetailIssues({sources,meta:base.meta});
- return {sources,meta:{...base.meta,raceClass:base.meta.raceClass||raceClassFromName(base.meta.raceName)},detailIssues,sourceRaceId:new URL(base.url).searchParams.get('race_id'),errors,absent};
+ const market=buildMarketSnapshot({rows:base.rows,capturedAt:base.market ? base.market.capturedAt ?? null : undefined,pageCapturedAt:base.capturedAt,siteUpdatedAt:base.market?.siteUpdatedAt,sourceName:base.market?.source||'netkeiba',sourceUrl:base.url,missingReason:base.market?.missingReason});
+ return {sources,meta:{...base.meta,raceClass:base.meta.raceClass||raceClassFromName(base.meta.raceName)},detailIssues,sourceRaceId:new URL(base.url).searchParams.get('race_id'),errors,absent,market};
 }
 // Preserve five slots, including non-starters. The adjacent annual best is cells[3].
 export function indexFields(row:any,recent=false){

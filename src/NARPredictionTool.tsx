@@ -23,6 +23,7 @@ import BatchImportPanel from './BatchImportPanel';
 import ResultImportPanel from './ResultImportPanel';
 import {planResultImport} from './resultImport';
 import {indexFields,prepareBatch} from './sourceImport';
+import {snapshotFromHorses,mergeMarketSnapshots,keepExistingMarketOnHorses,marketSourceEntry} from './marketSnapshot';
 import { clone, resultIssues, predictionView, sameField, orderedPrediction, chronological, makeLock, applyResult, mergeImport, abSummary } from "./raceIntegrity";
 
 // ---- 地方競馬 8枠カラー ----
@@ -3479,7 +3480,13 @@ export default function NARPredictionTool() {
     else if(sources.training)next=parseTrainingText(sources.training.text,next,inputContext);
     if(sources.comment)next=parseCommentText(sources.comment.text,next,inputContext);
     // Source timestamps remain input provenance, never a pre-race prediction timestamp.
-    next=next.map(h=>({...h,inputSources:Object.values(sources).map((p:any)=>({kind:p.kind,url:p.url,capturedAt:p.capturedAt})),finish:'',actualFinish:null}));
+    // 市場(オッズ・人気)は採点設定と独立に保存する。再取得で欠けていても、既存の市場情報を空データで上書きしない。
+    const sameRace=horses.length>0&&String(sourceRaceId)===String(draft.sourceRaceId)&&raceDate===meta.raceDate&&track===meta.track&&String(raceNo)===String(meta.raceNo);
+    const existingMarket=sameRace?snapshotFromHorses(horses):null;
+    const marketMerge=mergeMarketSnapshots(existingMarket,draft.market||null);
+    if(marketMerge.adopted==='existing'&&existingMarket)next=keepExistingMarketOnHorses(next,horses);
+    const marketEntry=marketSourceEntry(marketMerge.snapshot);
+    next=next.map(h=>({...h,inputSources:[...Object.values(sources).map((p:any)=>({kind:p.kind,url:p.url,capturedAt:p.capturedAt})),...(marketEntry?[marketEntry]:[])],finish:'',actualFinish:null}));
     setActiveSavedRaceId(null);setResultEntryMode(false);setResultOrderInput('');setRevisionOf(null);
     setRaceDate(meta.raceDate);setStartTime(meta.startTime||'');setTrack(meta.track);setDistance(meta.distance);setSurface(inputContext.surface);setRaceNo(meta.raceNo);setRaceName(meta.raceName||'');setRaceClass(inputContext.raceClass);
     const goingMap={'稍':'稍重','不':'不良'};setGoing(goingMap[meta.going]||(['良','稍重','重','不良'].includes(meta.going)?meta.going:'未確認'));

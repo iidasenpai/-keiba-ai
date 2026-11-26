@@ -4,6 +4,7 @@ import {venueCandidate} from './venueCandidate';
 import {OI_MODEL_BUILD,OI_MODEL_VERSION} from './oiModel';
 import {TRAINING_CANDIDATE_VERSION} from './structuredTraining';
 // Storage and historical predictions are kept separate from live recalculation.
+import { snapshotFromHorses, lockMarketSnapshot } from './marketSnapshot';
 import { finite, MODEL_VERSION, MODEL_BUILD, modelRows, instant, nonStarter, validateFullResults } from './modelSafety';
 import {CONDITION_VERSION} from './conditionCandidate';
 import {PACE_CANDIDATE_VERSION,STYLE_FIXED_VERSION,STYLE_FIXED_BONUS,STYLE_FIXED_RULE} from './styleCandidate';
@@ -63,7 +64,7 @@ export function makeLock(current: any[], modelA: any[], metadata: any, now: stri
   if(start!==null&&(instant(now) as number)>=start)throw new Error('発走後の予測は事前固定できません');
   const ordered = orderedPrediction(modelA.map(h => ({ ...h, predictedScore: h._finalScore })));
   const rows = (hs: any[]) => hs.map((h,i) => ({ id: h.id, umaban: h.umaban, rank: i+1, score: h._finalScore }));
-  return { ...clone(metadata), schemaVersion: 2, lockedAt: now, modelVersion: MODEL_VERSION, build:metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?OI_MODEL_BUILD:MODEL_BUILD, horses: clone(current), models: {
+  return { ...clone(metadata), schemaVersion: 2, lockedAt: now, marketSnapshot: lockMarketSnapshot(metadata.marketSnapshot || snapshotFromHorses(current, metadata.sourceName), now, metadata.scheduledStart), modelVersion: MODEL_VERSION, build:metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?OI_MODEL_BUILD:MODEL_BUILD, horses: clone(current), models: {
     current: rows(orderedPrediction(current)),
     ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))?{OiModel:{version:OI_MODEL_VERSION,predictions:rows(orderedPrediction(current)),diagnostics:current.map(h=>({umaban:h.umaban,...h.oiEvidence}))}}:{}),
     ...(metadata.track==='大井'&&[1200,1600].includes(Number(metadata.distance))&&Array.isArray(candidates.OiPeak3)?{OiPeak3:{version:OI_PEAK_VERSION,rule:OI_PEAK_RULE,predictions:rows(orderedPrediction(candidates.OiPeak3)),diagnostics:candidates.OiPeak3.map((h:any)=>({umaban:h.umaban,...h.oiPeakEvidence}))}}:{}),

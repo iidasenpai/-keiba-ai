@@ -5,6 +5,7 @@
 // - 空データで既存の市場情報を上書きしない(mergeMarketSnapshots)。
 export const MARKET_SNAPSHOT_VERSION = 'market-snapshot-v1';
 export const MARKET_ISSUE_LIMIT = 30;
+export const MARKET_REASON_UNSTATED = '理由未記載';
 export const MARKET_ATTEMPT_LIMIT = 20;
 
 const NON_STARTER = ['取消', '除外', 'DNS'];
@@ -49,6 +50,7 @@ export interface MarketRow {
   raceStatus: string;
   captureStatus: MarketRowStatus;
   missingReason: string | null;
+  oddsDisplay: string | null;   // 取得元ページに表示されていた文字列そのまま(例 "0.0")。入力にあるときだけ。
 }
 
 export interface MarketSnapshot {
@@ -81,6 +83,7 @@ export function buildMarketSnapshot(input: BuildMarketInput): MarketSnapshot {
   const reason = typeof input.missingReason === 'string' && input.missingReason.trim() ? input.missingReason.trim().slice(0, 200) : null;
   const rows: MarketRow[] = (input.rows || []).map((r: any) => {
     const odds = marketText(r?.odds), ninki = marketText(r?.ninki), raceStatus = marketText(r?.raceStatus);
+    const display = typeof r?.oddsDisplay === 'string' && r.oddsDisplay.trim() ? r.oddsDisplay.trim().slice(0, 50) : null;
     const rowReason = typeof r?.oddsMissingReason === 'string' && r.oddsMissingReason.trim() ? r.oddsMissingReason.trim().slice(0, 200) : null;
     let captureStatus: MarketRowStatus;
     if (isNonStarter(raceStatus)) captureStatus = 'scratched';
@@ -88,8 +91,8 @@ export function buildMarketSnapshot(input: BuildMarketInput): MarketSnapshot {
     else if (validOdds(odds) === null) captureStatus = 'invalid';
     else captureStatus = 'ok';
     return {
-      umaban: marketText(r?.umaban), name: marketText(r?.name), odds, ninki, raceStatus, captureStatus,
-      missingReason: captureStatus === 'ok' || captureStatus === 'scratched' ? null : rowReason || reason || '理由未記載'
+      umaban: marketText(r?.umaban), name: marketText(r?.name), odds, ninki, raceStatus, captureStatus, oddsDisplay: display,
+      missingReason: captureStatus === 'ok' || captureStatus === 'scratched' ? null : rowReason || reason || MARKET_REASON_UNSTATED
     };
   });
   const starters = rows.filter(r => r.captureStatus !== 'scratched');
@@ -203,10 +206,21 @@ const marketValues = (rows:any[]) => JSON.stringify(rows.map(h=>[String(h.umaban
 // 馬データの inputSources に入れる市場の取得情報(kind='market')。
 export function marketSourceEntry(snapshot: MarketSnapshot | null | undefined): any | null {
   if (!snapshot) return null;
+  // 行ごとの欠損理由(入力JSONの oddsMissingReason)。馬データには載らないので、取得の記録に持たせて固定まで運ぶ。
+  // ページ全体の理由と同じものは snapshot.missingReason から復元できるので重ねて持たない。
+  const rowReasons: Record<string, string> = Object.fromEntries((snapshot.rows || [])
+    .filter(r => (r.captureStatus === 'missing' || r.captureStatus === 'invalid') && r.missingReason && r.missingReason !== MARKET_REASON_UNSTATED && r.missingReason !== snapshot.missingReason)
+    .map(r => [String(r.umaban), r.missingReason as string]));
+  // 元の表示文字列(oddsDisplay)。数値化した値・欠損理由・取得時刻とは別に残し、後から「本当に0.0表示だったか」を確認できるようにする。
+  const rowDisplays: Record<string, string> = Object.fromEntries((snapshot.rows || [])
+    .filter(r => typeof r.oddsDisplay === 'string' && r.oddsDisplay)
+    .map(r => [String(r.umaban), r.oddsDisplay as string]));
   return {
     valuesSignature: marketValues(snapshot.rows),
     kind: 'market', url: snapshot.source.url, source: snapshot.source.name, capturedAt: snapshot.capturedAt, capturedAtBasis: snapshot.capturedAtBasis,
     siteUpdatedAt: snapshot.siteUpdatedAt, status: snapshot.status, missingReason: snapshot.missingReason,
+    ...(Object.keys(rowReasons).length ? { rowReasons } : {}),
+    ...(Object.keys(rowDisplays).length ? { rowDisplays } : {}),
     ...(snapshot.attempts ? { attempts: snapshot.attempts } : {})
   };
 }
@@ -218,14 +232,18 @@ export function snapshotFromHorses(horses: any[], sourceName?: string | null): M
   const markets = (horses || []).map(h => (h.inputSources || []).find((p:any) => p?.kind === 'market'));
   const market = markets[0];
   const matches = !!market && markets.every(m => m && JSON.stringify(m) === JSON.stringify(market)) && market.valuesSignature === marketValues(horses);
+  const reasons = matches && market.rowReasons && typeof market.rowReasons === 'object' ? market.rowReasons : {};
+  const displays = matches && market.rowDisplays && typeof market.rowDisplays === 'object' ? market.rowDisplays : {};
+  const reasonOf = (h: any) => { const v = reasons[String(h?.umaban)]; return typeof v === 'string' && v.trim() ? v : undefined; };
+  const displayOf = (h: any) => { const v = displays[String(h?.umaban)]; return typeof v === 'string' && v.trim() ? v : undefined; };
   const snap = buildMarketSnapshot({
-    rows: horses || [],
+    rows: (horses || []).map(h => (reasonOf(h) || displayOf(h) ? { ...h, ...(reasonOf(h) ? { oddsMissingReason: reasonOf(h) } : {}), ...(displayOf(h) ? { oddsDisplay: displayOf(h) } : {}) } : h)),
     capturedAt: matches ? market.capturedAt : null,
     pageCapturedAt: null,
     siteUpdatedAt: matches ? market.siteUpdatedAt : null,
     sourceName: market?.source ?? sourceName ?? null,
     sourceUrl: market?.url ?? null,
-    missingReason: market?.missingReason
+    missingReason: matches ? market?.missingReason : null
   });
   return market?.attempts ? { ...snap, attempts: market.attempts } : snap;
 }

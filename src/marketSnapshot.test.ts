@@ -244,3 +244,101 @@ describe('既存の更新判定(planDraftUpdate)が market エントリで止ま
  expect(buildMarketSnapshot({rows:rowsOf(['0.5','2','3','4'],['1','2','3','4'])}).status).toBe('partial');
  });
  });
+
+describe('行ごとの欠損理由を固定(lock)まで保持する',()=>{
+ const REASON='取得時点の表示が0.0で、有効な単勝オッズを確認できない';
+ const withScores=(hs:any[])=>hs.map((h:any,i:number)=>({...h,id:'h'+h.umaban,finish:'',actualFinish:null,_finalScore:50-i,_rank:i+1,predictedScore:50-i}));
+ const lockOf=(hs:any[],now:string,start:string)=>makeLock(hs,hs,{scheduledStart:start,sourceName:'netkeiba',track:'名古屋',distance:'1500',raceNo:'12'},now);
+ // 入力JSONと同じ形: 人気は入っていてオッズだけ null、行に理由
+ const rowsWithReason=()=>{const rows:any[]=rowsOf(['2.1','5.5','8.0',null],['1','2','3','4']);rows[3]={...rows[3],oddsMissingReason:REASON};return rows;};
+ it('取り込み→馬データ→スナップショット→lock の全段階で理由が残る',()=>{
+  const d=prepareSources([bundle(rowsWithReason(),{market:{capturedAt:iso(-40*MIN)}},iso(-40*MIN))]);
+  expect(d.market.rows[3].missingReason).toBe(REASON);
+  const hs=applyDraft(d,[]);
+  const rebuilt=snapshotFromHorses(hs);
+  expect(rebuilt.rows[3].captureStatus).toBe('missing');
+  expect(rebuilt.rows[3].missingReason).toBe(REASON);
+  const l=lockOf(withScores(hs),iso(-10*MIN),iso(30*MIN));
+  expect(l.marketSnapshot.rows[3].missingReason).toBe(REASON);
+  expect(l.marketSnapshot.rows[3].ninki).toBe('4');
+  expect(l.marketSnapshot.status).toBe('partial');
+  expect(l.marketSnapshot.candidate.usable).toBe(false);
+ });
+ it('行ごとに理由が違っても取り違えない。ページ全体の理由は理由のない行に使われる',()=>{
+  const rows:any[]=rowsOf(['2.1','','',''],['1','2','3','4']);
+  rows[1]={...rows[1],oddsMissingReason:'理由A'};rows[2]={...rows[2],oddsMissingReason:'理由B'};
+  const d=prepareSources([bundle(rows,{market:{capturedAt:iso(-40*MIN),missingReason:'ページ全体の理由'}},iso(-40*MIN))]);
+  const s=snapshotFromHorses(applyDraft(d,[]));
+  expect(s.rows.map(r=>r.missingReason)).toEqual([null,'理由A','理由B','ページ全体の理由']);
+ });
+ it('再取得で既存を保持した場合も、行別の理由は消えない',()=>{
+  const d1=prepareSources([bundle(rowsWithReason(),{market:{capturedAt:iso(-40*MIN)}},iso(-40*MIN))]);
+  const h1=applyDraft(d1,[]);
+  const d2=prepareSources([bundle(rowsOf(['','','',''],['','','','']),{market:{capturedAt:iso(-20*MIN),missingReason:'取得失敗'}},iso(-20*MIN))]);
+  const h2=applyDraft(d2,h1);
+  expect(snapshotFromHorses(h2).rows[3].missingReason).toBe(REASON);
+ });
+ it('取り込み後に値を手で直した馬データには、元の理由・取得時刻を流用しない',()=>{
+  const d=prepareSources([bundle(rowsWithReason(),{market:{capturedAt:iso(-40*MIN)}},iso(-40*MIN))]);
+  const hs=applyDraft(d,[]);hs[0]={...hs[0],odds:'3.3'};
+  const s=snapshotFromHorses(hs);
+  expect(s.capturedAt).toBeNull();
+  expect(s.rows[3].missingReason).toBe('理由未記載');
+ });
+ it('理由のない旧形式の記録は従来どおり読める(理由未記載)',()=>{
+  const d=prepareSources([bundle(rowsOf(['2.1','5.5','8.0',null],['1','2','3','4']),{market:{capturedAt:iso(-40*MIN)}},iso(-40*MIN))]);
+  const s=snapshotFromHorses(applyDraft(d,[]));
+  expect(s.rows[3].captureStatus).toBe('missing');expect(s.rows[3].missingReason).toBe('理由未記載');
+  expect(marketSourceEntry(buildMarketSnapshot({rows:full(),capturedAt:iso(-5*MIN)}))).not.toHaveProperty('rowReasons');
+ });
+});
+
+describe('復元の条件(馬名・市場値まで一致したときだけ)と oddsDisplay',()=>{
+ const REASON='取得時点の表示が0.0で、有効な単勝オッズを確認できない';
+ const mk=()=>{const rows:any[]=rowsOf(['2.1','5.5','8.0',null],['1','2','3','4']);rows[3]={...rows[3],oddsMissingReason:REASON,oddsDisplay:'0.0'};rows[0]={...rows[0],oddsDisplay:'2.1'};return applyDraft(prepareSources([bundle(rows,{market:{capturedAt:iso(-40*MIN)}},iso(-40*MIN))]),[]);};
+ it('一致していれば、理由と元の表示文字列が復元される。数値・理由・表示は別項目',()=>{
+  const r=snapshotFromHorses(mk()).rows[3];
+  expect(r.odds).toBe('');expect(r.captureStatus).toBe('missing');expect(r.missingReason).toBe(REASON);expect(r.oddsDisplay).toBe('0.0');
+  expect(snapshotFromHorses(mk()).rows[0].oddsDisplay).toBe('2.1');
+ });
+ it('馬名が1頭でも違えば復元しない(理由も表示も時刻も流用しない)',()=>{
+  const hs=mk();hs[1]={...hs[1],name:'別の馬'};
+  const s=snapshotFromHorses(hs);
+  expect(s.capturedAt).toBeNull();expect(s.rows[3].missingReason).toBe('理由未記載');expect(s.rows[3].oddsDisplay).toBeNull();
+ });
+ it('人気や出走状況が違っても復元しない',()=>{
+  const a=mk();a[2]={...a[2],ninki:'9'};expect(snapshotFromHorses(a).rows[3].missingReason).toBe('理由未記載');
+  const b=mk();b[2]={...b[2],raceStatus:'取消'};expect(snapshotFromHorses(b).rows[3].oddsDisplay).toBeNull();
+ });
+ it('馬ごとに取得記録が食い違うデータでは復元しない',()=>{
+  const hs=mk();hs[0]={...hs[0],inputSources:hs[0].inputSources.map((p:any)=>p.kind==='market'?{...p,rowReasons:{'4':'別の理由'}}:p)};
+  expect(snapshotFromHorses(hs).rows[3].missingReason).toBe('理由未記載');
+ });
+ it('表示文字列は lock まで残り、入力に無ければ null。不正な型は取り込みで拒否',()=>{
+  const hs=mk().map((h:any,i:number)=>({...h,id:'h'+h.umaban,finish:'',actualFinish:null,_finalScore:50-i,_rank:i+1,predictedScore:50-i}));
+  const l=makeLock(hs,hs,{scheduledStart:iso(30*MIN),sourceName:'netkeiba',track:'名古屋',distance:'1500',raceNo:'12'},iso(-10*MIN));
+  expect(l.marketSnapshot.rows[3].oddsDisplay).toBe('0.0');
+  expect(l.marketSnapshot.rows[1].oddsDisplay).toBeNull();
+  expect(()=>prepareSources([bundle(rowsOf(['2.1','5.5','8.0','12.3'],['1','2','3','4']).map((r:any,i:number)=>i===0?{...r,oddsDisplay:{x:1}}:r))])).toThrow();
+ });
+});
+
+describe('ページ全体の欠損理由も署名が一致するときだけ復元する',()=>{
+ const PAGE='取得元でオッズ欄が未掲載';
+ const mk=()=>applyDraft(prepareSources([bundle(rowsOf(['2.1','','',''],['1','2','3','4']),{market:{capturedAt:iso(-40*MIN),missingReason:PAGE}},iso(-40*MIN))]),[]);
+ it('一致していればページ全体の理由が復元され、理由のない行にも使われる',()=>{
+  const s=snapshotFromHorses(mk());
+  expect(s.missingReason).toBe(PAGE);expect(s.rows[1].missingReason).toBe(PAGE);
+ });
+ it('馬名が変わって署名が不一致なら、古いページ全体の理由を復元しない',()=>{
+  const hs=mk();hs[0]={...hs[0],name:'別の馬'};
+  const s=snapshotFromHorses(hs);
+  expect(s.missingReason).toBeNull();
+  expect(s.rows[1].missingReason).toBe('理由未記載');
+  expect(s.capturedAt).toBeNull();
+ });
+ it('オッズが変わって署名が不一致でも、古いページ全体の理由を復元しない',()=>{
+  const hs=mk();hs[0]={...hs[0],odds:'3.3'};
+  expect(snapshotFromHorses(hs).missingReason).toBeNull();
+ });
+});

@@ -46,7 +46,7 @@ export function prepareSources(bundles:any[]) {
    const nos=new Set();for(const [i,h] of p.roster.entries()){
     if(!/^(?:[1-9]|1[0-8])$/.test(h.umaban)||!str(h.name,40).trim()||nos.has(h.umaban))throw Error('馬番・馬名の重複または欠落があります');nos.add(h.umaban);
     if(p.rows[i].umaban!==h.umaban||tidy(p.rows[i].name)!==tidy(h.name))throw Error('行データと馬一覧が一致しません');
-    if(p.kind==='race'){for(const k of ['sex','jockey','weight','bodyChange','raceStatus'])if(p.rows[i][k]!==undefined)str(p.rows[i][k],100);for(const k of ['odds','ninki']){const v=p.rows[i][k];if(v!==undefined&&v!==null&&!(typeof v==='number'&&Number.isFinite(v)))str(v,100);}const mr=p.rows[i].oddsMissingReason;if(mr!==undefined&&mr!==null)str(mr,200);}
+    if(p.kind==='race'){for(const k of ['sex','jockey','weight','bodyChange','raceStatus'])if(p.rows[i][k]!==undefined)str(p.rows[i][k],100);for(const k of ['odds','ninki']){const v=p.rows[i][k];if(v!==undefined&&v!==null&&!(typeof v==='number'&&Number.isFinite(v)))str(v,100);}const mr=p.rows[i].oddsMissingReason;if(mr!==undefined&&mr!==null)str(mr,200);const od=p.rows[i].oddsDisplay;if(od!==undefined&&od!==null)str(od,50);}
     if(['standard','recent'].includes(p.kind)){
      const c=p.rows[i].cells;if(!Array.isArray(c)||c.length!==(p.kind==='standard'?15:12)||c.some(v=>typeof v!=='string'||v.length>200)||c[0]!==h.umaban||tidy(c[2])!==tidy(h.name))throw Error('指数表の列数・馬情報が変わっています');
      const row=p.rows[i];

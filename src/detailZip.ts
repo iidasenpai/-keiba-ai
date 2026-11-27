@@ -1,3 +1,4 @@
+import {packArchiveRecord,unpackArchiveRecord} from './archivePacking';
 // Standard ZIP/deflate using native gzip streams. One race is compressed or
 // expanded at a time; never stringify the complete history into one string.
 import {DETAIL_VERSION,detailDigest} from './historyDetails';
@@ -5,8 +6,10 @@ const enc=new TextEncoder(),dec=new TextDecoder();
 const u16=(v:DataView,o:number,n:number)=>v.setUint16(o,n,true);
 const u32=(v:DataView,o:number,n:number)=>v.setUint32(o,n,true);
 function bytes(n:number){const a=new Uint8Array(n);return {a,v:new DataView(a.buffer)};}
-export async function writeDetailZip(records:any[],cutoff:string,onProgress?:(n:number)=>void){
+export const FULL_BACKUP_ZIP='nar-full-backup-zip-v1';
+export async function writeDetailZip(records:any[],cutoff:string,onProgress?:(n:number)=>void,full?:{state:any}){
  if(typeof CompressionStream==='undefined'||typeof DecompressionStream==='undefined')throw Error('このブラウザはZIPの圧縮・検証に対応していません');
+ if(records.length>9998)throw Error('バックアップの対象件数が多すぎます');
  const archiveId=crypto.randomUUID(),files:any[]=[],parts:BlobPart[]=[],central:BlobPart[]=[];let offset=0;
  const add=async(name:string,text:string)=>{
   const plain=enc.encode(text);if(plain.length>32_000_000)throw Error('1レースのデータが大きすぎます');const g=new Uint8Array(await new Response(new Blob([plain]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
@@ -18,15 +21,17 @@ export async function writeDetailZip(records:any[],cutoff:string,onProgress?:(n:
  };
  for(let i=0;i<records.length;i++){
   const r=records[i],name=`races/${String(i).padStart(5,'0')}.json`;
-  files.push({name,id:r.id,digest:await detailDigest(r)});await add(name,JSON.stringify(r));onProgress?.(i+1);
+  files.push({name,id:r.id,digest:await detailDigest(r),...(full?{packed:true}:{})});await add(name,JSON.stringify(full?packArchiveRecord(r):r));onProgress?.(i+1);
   if(i%10===0)await new Promise(resolve=>setTimeout(resolve,0));
  }
- const manifest={type:DETAIL_VERSION,archiveId,cutoff,exportedAt:new Date().toISOString(),files};
+ const stateDigest=full?await detailDigest(full.state):undefined;
+ if(full)await add('state.json',JSON.stringify(full.state));
+ const manifest={type:full?FULL_BACKUP_ZIP:DETAIL_VERSION,archiveId,cutoff,exportedAt:new Date().toISOString(),files,...(full?{stateDigest}:{})};
  await add('manifest.json',JSON.stringify(manifest));const size=central.reduce((n,p)=>n+(p as Uint8Array).byteLength,0),e=bytes(22);
- u32(e.v,0,0x06054b50);u16(e.v,8,files.length+1);u16(e.v,10,files.length+1);u32(e.v,12,size);u32(e.v,16,offset);
+ u32(e.v,0,0x06054b50);u16(e.v,8,files.length+(full?2:1));u16(e.v,10,files.length+(full?2:1));u32(e.v,12,size);u32(e.v,16,offset);
  return {blob:new Blob([...parts,...central,e.a],{type:'application/zip'}),manifest};
 }
-export async function openDetailZip(file:Blob){
+export async function openDetailZip(file:Blob,expectedType=DETAIL_VERSION){
  const tail=new Uint8Array(await file.slice(Math.max(0,file.size-65557)).arrayBuffer());let pos=-1;
  for(let i=tail.length-22;i>=0;i--)if(new DataView(tail.buffer).getUint32(i,true)===0x06054b50){pos=i;break;}
  if(pos<0)throw Error('ZIP形式を確認できません');
@@ -37,7 +42,7 @@ export async function openDetailZip(file:Blob){
   if(p+46>cd.length)throw Error('ZIPの一覧が途中で切れています');const v=new DataView(cd.buffer,p);
   if(v.getUint32(0,true)!==0x02014b50||v.getUint16(10,true)!==8||(v.getUint16(8,true)&1))throw Error('対応しないZIP項目です');
   const nl=v.getUint16(28,true),extra=v.getUint16(30,true),comment=v.getUint16(32,true),name=dec.decode(cd.slice(p+46,p+46+nl));
-  if(entries.has(name)||(!/^races\/\d{5}\.json$/.test(name)&&name!=='manifest.json'))throw Error('ZIP内のファイル名が不正です');
+  if(entries.has(name)||(!/^races\/\d{5}\.json$/.test(name)&&name!=='manifest.json'&&name!=='state.json'))throw Error('ZIP内のファイル名が不正です');
   entries.set(name,{name,crc:v.getUint32(16,true),compressed:v.getUint32(20,true),size:v.getUint32(24,true),offset:v.getUint32(42,true)});p+=46+nl+extra+comment;
  }
  const read=async(name:string)=>{
@@ -52,7 +57,7 @@ export async function openDetailZip(file:Blob){
   return JSON.parse(await new Blob(chunks).text(),(k,v)=>{if(['__proto__','constructor','prototype'].includes(k))throw Error('不正なデータ項目です');return v;});
  };
  const manifest=await read('manifest.json');
- if(manifest.type!==DETAIL_VERSION||typeof manifest.archiveId!=='string'||!Array.isArray(manifest.files)||manifest.files.length+1!==count||!/^\d{4}-\d{2}-\d{2}$/.test(manifest.cutoff))throw Error('詳細退避用ZIPではありません');
+ if(manifest.type!==expectedType||typeof manifest.archiveId!=='string'||!Array.isArray(manifest.files)||manifest.files.length+(expectedType===FULL_BACKUP_ZIP?2:1)!==count||(expectedType!==FULL_BACKUP_ZIP&&!/^\d{4}-\d{2}-\d{2}$/.test(manifest.cutoff)))throw Error('選択したZIPの種類または形式が違います');
  const ids=new Set(),names=new Set();for(const row of manifest.files){if(typeof row.id!=='string'||ids.has(row.id)||names.has(row.name)||!entries.has(row.name)||!/^races\/\d{5}\.json$/.test(row.name)||!/^[0-9a-f]{64}$/.test(row.digest))throw Error('ZIPのレース一覧が不正です');ids.add(row.id);names.add(row.name);}
- return {manifest,readRace:async(row:any)=>{const r=await read(row.name);if(r.id!==row.id||await detailDigest(r)!==row.digest)throw Error('退避したレースの検証に失敗しました');return r;}};
+ return {manifest,readRace:async(row:any)=>{const stored=await read(row.name),r=row.packed?unpackArchiveRecord(stored):stored;if(r.id!==row.id||await detailDigest(r)!==row.digest)throw Error('退避したレースの検証に失敗しました');return r;},readState:async()=>{if(expectedType!==FULL_BACKUP_ZIP)throw Error('全データバックアップではありません');const state=await read('state.json');if(!state||typeof state!=='object'||Array.isArray(state)||await detailDigest(state)!==manifest.stateDigest)throw Error('設定データの検証に失敗しました');return state;}};
 }

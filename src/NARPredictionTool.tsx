@@ -1,3 +1,4 @@
+import {createFullBackup,readFullBackup} from './fullBackup';
 import DeferredDetails,{useDesktopLayout,databasePage} from './DeferredDetails';
 import HistoryDetailPanel from './HistoryDetailPanel';
 import {applyDetailZip} from './historyDetailActions';
@@ -226,6 +227,11 @@ export default function NARPredictionTool() {
   const [horseDbOpen, setHorseDbOpen] = useState(false);
   const [analysisOpen,setAnalysisOpen] = useState(false);
   const [savedPage, setSavedPage] = useState(0);
+  const [backupBusy,setBackupBusy]=useState(false);
+  const backupBusyRef=useRef(false);
+  const [backupMessage,setBackupMessage]=useState('');
+  const [backupReady,setBackupReady]=useState<{url:string;name:string;count:number;bytes:number}|null>(null);
+  useEffect(()=>()=>{if(backupReady)URL.revokeObjectURL(backupReady.url);},[backupReady]);
   const desktopLayout=useDesktopLayout();
   const [desktopInsightsOpen,setDesktopInsightsOpen]=useState(false);
   const [mobileDetailIds,setMobileDetailIds]=useState<Set<string>>(()=>new Set());
@@ -364,41 +370,39 @@ export default function NARPredictionTool() {
 
   const isDeploymentUrl = typeof window !== "undefined" && /-projects\.vercel\.app$/i.test(window.location.hostname);
 
-  const exportFullBackup = () => {
-    const payload = {
-      type: "nar-ai-full-backup",
-      version: "1.0.0",
-      exportedAt: new Date().toISOString(),
-      state: currentState,
-      savedRaces,
-    };
-    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `nar-ai-full-backup-${new Date().toLocaleDateString("sv-SE",{timeZone:"Asia/Tokyo"})}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    flash(`全データを書き出しました（${savedRaces.length}レース）`);
+  const exportFullBackup = async () => {
+    if(backupBusyRef.current)return;
+    backupBusyRef.current=true;setBackupBusy(true);setBackupReady(null);setBackupMessage('全データのZIPを準備しています。');
+    try {
+      if(automaticSave.current)await automaticSave.current;
+      if(committing.current)throw new Error('別の保存処理中です。完了後にもう一度押してください');
+      if(!storageReady)throw new Error('保存データを正しく読み込めていないため、全データ保存は中止しました');
+      const snapshot=live.current;
+      const blob=await createFullBackup(snapshot.state,snapshot.savedRaces,(stage,n,total)=>{if(n%10===0||n===total)setBackupMessage(`全データZIP ${stage}中 ${n}/${total}レース。画面を閉じずにお待ちください。`);});
+      setBackupReady({url:URL.createObjectURL(blob),name:`nar-ai-full-backup-${new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Tokyo'})}.zip`,count:snapshot.savedRaces.length,bytes:blob.size});
+      setBackupMessage('ZIPの作成・内容検証が完了しました。下の「ZIPを端末に保存」を押してください。まだ端末への保存は完了していません。');
+    } catch(e) {setBackupMessage(`全データ保存を完了できませんでした: ${e instanceof Error?e.message:'書き出しエラー'}。アプリ内のデータは変更していません。`);}
+    finally {backupBusyRef.current=false;setBackupBusy(false);}
   };
 
   const importFullBackup = () => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "application/json,.json";
-    input.onchange = () => {
+    input.accept = "application/json,.json,application/zip,.zip";
+    input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const data = JSON.parse(String(reader.result || ""));
+      if(backupBusyRef.current){alert('バックアップ処理中です。完了後に再試行してください');return;}
+      backupBusyRef.current=true;setBackupBusy(true);let ownsCommit=false;
+      try {
+          setBackupMessage('バックアップを読み込んでいます。');
+          const data = await readFullBackup(file,(n,total)=>{if(n%10===0||n===total)setBackupMessage(`バックアップ読込中 ${n}/${total}レース`);});
           if (data?.type !== "nar-ai-full-backup" || !data?.state || !Array.isArray(data?.savedRaces)) {
             throw new Error("地方競馬AIの全データバックアップではありません");
           }
           if (automaticSave.current) await automaticSave.current;
           if (!storageReady || committing.current) throw new Error('保存処理中または保存領域が未準備です');
-          committing.current = true;
+          committing.current = true;ownsCommit=true;
           const merged = mergeImport(live.current.savedRaces, data.savedRaces);
           const restoredCount = merged.filter((r:any)=>r.status==='completed' && r.learnedApplied && !resultIssues(r).length).length;
           const st = live.current.savedRaces.length ? { ...data.state, learned, historyCount:restoredCount, learningHistory } : { ...data.state, historyCount:restoredCount, learningHistory:[...(data.state.learningHistory||[]),{kind:'legacy-counter-import',at:new Date().toISOString(),reportedCount:data.state.historyCount,validatedProcessedCount:restoredCount}] };
@@ -434,9 +438,7 @@ export default function NARPredictionTool() {
           flash(`追加復元しました（${merged.length}レース・差異${conflicts}件は既存版を保持）`);
         } catch (e) {
           alert(`復元できませんでした: ${e instanceof Error ? e.message : "ファイル形式エラー"}`);
-        } finally { committing.current = false; }
-      };
-      reader.readAsText(file);
+        } finally {if(ownsCommit)committing.current=false;backupBusyRef.current=false;setBackupBusy(false);setBackupMessage('');}
     };
     input.click();
   };
@@ -3701,8 +3703,9 @@ export default function NARPredictionTool() {
             <button onClick={addHorse} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-bold text-white">＋1頭追加</button>
             <button onClick={() => setImportOpen((v) => !v)} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-bold">一括貼り付け</button>
             <button onClick={doExport} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-bold">JSON書き出し</button>
-            <button onClick={exportFullBackup} className="rounded-lg bg-indigo-700 px-3 py-2 text-xs font-bold text-white">全データ保存</button>
-            <button onClick={importFullBackup} className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700">全データ読込</button>
+            <button disabled={backupBusy} onClick={exportFullBackup} className="rounded-lg bg-indigo-700 px-3 py-2 text-xs font-bold text-white">{backupBusy?"バックアップ処理中…":"全データ保存"}</button>
+            <button disabled={backupBusy} onClick={importFullBackup} className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700">全データ読込</button>
+            <div className="w-full text-xs" role="status"><p>{backupMessage}</p>{backupReady&&<a href={backupReady.url} download={backupReady.name} className="mt-2 inline-block rounded-lg bg-emerald-700 px-4 py-3 font-bold text-white">ZIPを端末に保存（{backupReady.count}レース・{(backupReady.bytes/1048576).toFixed(1)}MB）</a>}</div>
             {horses.length > 0 && <button onClick={clearAll} className="rounded-lg border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-500">全削除</button>}
           </div>
         </details>

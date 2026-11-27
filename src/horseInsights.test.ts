@@ -4,6 +4,12 @@ const h=(finish:any,extra:any={})=>({name:'テストホース',finish,...extra})
 const r=(date:string,no:number,horse:any,extra:any={})=>({raceDate:date,raceNo:String(no),track:'大井',surface:'ダート',distance:'1200',status:'completed',horses:[horse],...extra});
 const evidence=(date:string)=>[{date}];
 describe('read-only horse history',()=>{
+ it('limits display-only indexing to requested horses without changing their histories',()=>{
+  const rows=[r('2026-10-01',1,h('1')),r('2026-10-02',1,h('2')),r('2026-10-03',1,h('1',{name:'別の馬'}))];
+  const all=historyIndex(rows),limited=historyIndex(rows,['テスト ホース']);
+  expect([...limited.keys()]).toEqual(['テストホース']);expect(limited.get('テストホース')).toEqual(all.get('テストホース'));
+  expect(historyIndex(rows,[]).size).toBe(0);
+ });
  it('excludes current/future days, cancellations, pending and missing results; separates conditions',()=>{
   const idx=historyIndex([r('2026-10-01',1,h('1')),r('2026-10-02',1,h('2'),{distance:'1600'}),r('2026-10-03',1,h('3'),{track:'金沢'}),r('2026-10-04',1,h('',{raceStatus:'取消'})),r('2026-10-05',1,h('')),r('2026-10-06',1,h('1'),{status:'pending'}),r('2026-11-16',1,h('1')),r('2026-11-17',1,h('1')),r('2026-10-07',1,h('1'),{surface:'芝'})]);
   const out=horseInsights(idx,h(''),{raceDate:'2026-11-16',track:'大井',distance:1200,surface:'ダート'});

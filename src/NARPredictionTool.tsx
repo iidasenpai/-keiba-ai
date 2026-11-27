@@ -1,3 +1,4 @@
+import DeferredDetails,{useDesktopLayout,databasePage} from './DeferredDetails';
 import HistoryDetailPanel from './HistoryDetailPanel';
 import {applyDetailZip} from './historyDetailActions';
 import {oiPeakCandidate} from './oiPeakCandidate';
@@ -225,6 +226,10 @@ export default function NARPredictionTool() {
   const [horseDbOpen, setHorseDbOpen] = useState(false);
   const [analysisOpen,setAnalysisOpen] = useState(false);
   const [savedPage, setSavedPage] = useState(0);
+  const desktopLayout=useDesktopLayout();
+  const [desktopInsightsOpen,setDesktopInsightsOpen]=useState(false);
+  const [mobileDetailIds,setMobileDetailIds]=useState<Set<string>>(()=>new Set());
+  const [horseDbPage,setHorseDbPage]=useState(0);
   const [horseDbQuery, setHorseDbQuery] = useState("");
   const [horseDbSelected, setHorseDbSelected] = useState<string>("");
 
@@ -2014,7 +2019,9 @@ export default function NARPredictionTool() {
     flash("Azure解析JSONを書き出しました");
   };
 
-  const horseInsightIndex = useMemo(() => historyIndex(savedRaces), [savedRaces]);
+  const needsInsightIndex=desktopLayout?desktopInsightsOpen:horses.some(h=>mobileDetailIds.has(String(h.id)));
+  const insightNameKey=JSON.stringify([...new Set(horses.map(h=>h.name||''))].sort());
+  const horseInsightIndex = useMemo(() => needsInsightIndex?historyIndex(savedRaces,JSON.parse(insightNameKey)):new Map(), [savedRaces,needsInsightIndex,insightNameKey]);
   // ---- 馬データベース（保存済みレースから自動生成） ----
   // 別ストレージへ複製せず nar-saved-races を正本にするため、既存バックアップとの互換性を保つ。
   const normalizeHorseDbName = (v:any) => String(v || "").replace(/[\s　]+/g, "").trim();
@@ -2056,6 +2063,8 @@ export default function NARPredictionTool() {
     });
     return Array.from(map.values()).map((d:any) => ({...d, records:d.records.sort((a:any,b:any)=>String(b.savedAt).localeCompare(String(a.savedAt)))})).sort((a:any,b:any)=>b.starts-a.starts || a.name.localeCompare(b.name,"ja"));
   }, [savedRaces,horseDbOpen]);
+  const matchingHorseDb=useMemo(()=>horseDatabase.filter((d:any)=>!horseDbQuery.trim()||d.name.includes(horseDbQuery.trim())),[horseDatabase,horseDbQuery]);
+  const horseDbWindow=databasePage(matchingHorseDb,horseDbPage);
   const selectedHorseDb:any = horseDatabase.find((d:any)=>d.key===horseDbSelected) || null;
   const downloadJsonFile = (filename:string, data:any) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
@@ -3767,16 +3776,15 @@ export default function NARPredictionTool() {
         <button onClick={()=>document.getElementById("result-section")?.scrollIntoView({behavior:"smooth",block:"start"})} className="shrink-0 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-[10px] font-black text-indigo-700">予想へ戻る</button>
       </div>
       <div id="horses-section" className="scroll-mt-28" />
-      <details className="mx-3 mt-3 hidden rounded-xl border border-stone-200 bg-white p-3 sm:block"><summary className="cursor-pointer text-sm font-bold">各馬の蓄積成績（会場・距離・休み明け）</summary><div className="mt-3 grid grid-cols-2 gap-3">{ranked.map(h=><div key={`insight-${h.id}`}><h3 className="mb-1 text-sm font-bold">{h.umaban} {h.name}</h3><HorseInsightCard index={horseInsightIndex} horse={h} meta={{raceDate,track,distance,surface}} /></div>)}</div></details>
-      <div className="mx-3 mt-3 space-y-2 sm:hidden">
+      {desktopLayout&&<DeferredDetails open={desktopInsightsOpen} onOpenChange={setDesktopInsightsOpen} className="mx-3 mt-3 rounded-xl border border-stone-200 bg-white p-3" summary="各馬の蓄積成績（会場・距離・休み明け）">{()=>(<div className="mt-3 grid grid-cols-2 gap-3">{ranked.map(h=><div key={`insight-${h.id}`}><h3 className="mb-1 text-sm font-bold">{h.umaban} {h.name}</h3><HorseInsightCard index={horseInsightIndex} horse={h} meta={{raceDate,track,distance,surface}} /></div>)}</div>)}</DeferredDetails>}
+      {!desktopLayout&&<div className="mx-3 mt-3 space-y-2">
         {ranked
           .slice()
           .sort((a,b)=>Number(a.umaban||0)-Number(b.umaban||0))
           .map((h:any)=>{
             const waku = h.umaban && !Number.isNaN(Number(h.umaban)) ? wakuOf(h.umaban) : null;
             const wc = waku ? WAKU_COLORS[waku] : { bg:"#eee", text:"#999", border:"#ccc" };
-            return <details key={`mobile-detail-${h.id}`} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <summary className="list-none cursor-pointer px-3 py-3">
+            return <DeferredDetails key={`mobile-detail-${h.id}`} open={mobileDetailIds.has(String(h.id))} onOpenChange={open=>setMobileDetailIds(prev=>{const next=new Set(prev);open?next.add(String(h.id)):next.delete(String(h.id));return next;})} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" summary={<div className="px-3 py-3">
                 <div className="flex items-center gap-3">
                   <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-sm font-black" style={{background:wc.bg,color:wc.text,borderColor:wc.border}}>{h.umaban||"-"}</span>
                   <div className="min-w-0 flex-1">
@@ -3793,7 +3801,8 @@ export default function NARPredictionTool() {
                   </div>
                   <span className="text-xs text-slate-400">詳細⌄</span>
                 </div>
-              </summary>
+              </div>}>
+              {()=>(
               <div className="border-t border-slate-100 p-3">
                 <div className="mb-3"><HorseInsightCard index={horseInsightIndex} horse={h} meta={{raceDate,track,distance,surface}} /></div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
@@ -3826,12 +3835,13 @@ export default function NARPredictionTool() {
                 </div>
                 <button type="button" onClick={()=>{ if(confirm(`${h.umaban}番 ${h.name || "この馬"} を出走馬から削除しますか？`)) removeHorse(h.id); }} className="mt-3 w-full rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-black text-red-600">出走取消・この馬を削除</button>
               </div>
-            </details>;
+              )}
+            </DeferredDetails>;
           })}
         {horses.length===0&&<div className="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-400">出走馬データがありません。</div>}
-      </div>
+      </div>}
 
-      <div className="hidden sm:block scroll-mt-28 mx-3 mt-3 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-x-auto">
+      {desktopLayout&&<div className="hidden sm:block scroll-mt-28 mx-3 mt-3 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-x-auto">
         <table className="min-w-full border-collapse">
           <thead>
             <tr className="bg-gray-50">
@@ -3949,7 +3959,7 @@ export default function NARPredictionTool() {
             )}
           </tbody>
         </table>
-      </div>
+      </div>}
 
       <div className="mx-3 mt-2 text-xs text-gray-400 leading-relaxed">
         <div>※未取得項目は未知として扱います。馬体重・増減は採点対象外です。</div>
@@ -4078,11 +4088,12 @@ export default function NARPredictionTool() {
           </div>
           {!selectedHorseDb ? <>
             <div className="mt-3 flex gap-2">
-              <input value={horseDbQuery} onChange={e=>setHorseDbQuery(e.target.value)} placeholder="馬名で検索" className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-violet-500" />
+              <input value={horseDbQuery} onChange={e=>{setHorseDbQuery(e.target.value);setHorseDbPage(0);}} placeholder="馬名で検索" className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-violet-500" />
               <button onClick={exportAllHorseCards} className="shrink-0 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] font-black text-violet-700">全頭JSON保存</button>
             </div>
+            <div className="mt-2 flex items-center justify-between gap-2 text-xs"><button disabled={!horseDbWindow.page} onClick={()=>setHorseDbPage(horseDbWindow.page-1)}>前へ</button><span>検索結果 {matchingHorseDb.length}頭・{horseDbWindow.pages?horseDbWindow.page+1:0}/{horseDbWindow.pages}ページ（50頭ずつ）</span><button disabled={horseDbWindow.page+1>=horseDbWindow.pages} onClick={()=>setHorseDbPage(horseDbWindow.page+1)}>次へ</button></div>
             <div className="mt-3 max-h-[65vh] space-y-2 overflow-y-auto pr-1">
-              {horseDatabase.filter((d:any)=>!horseDbQuery.trim() || d.name.includes(horseDbQuery.trim())).map((d:any)=><button key={d.key} onClick={()=>setHorseDbSelected(d.key)} className="w-full rounded-xl border border-slate-200 p-3 text-left active:bg-violet-50">
+              {horseDbWindow.rows.map((d:any)=><button key={d.key} onClick={()=>setHorseDbSelected(d.key)} className="w-full rounded-xl border border-slate-200 p-3 text-left active:bg-violet-50">
                 <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-black text-slate-900">{d.name}</span><span className="shrink-0 rounded-full bg-violet-100 px-2 py-1 text-[10px] font-black text-violet-700">保存 {d.starts}R</span></div>
                 <div className="mt-1 text-[10px] text-slate-500">結果済 {d.completed}R　1着 {d.wins} / 2着 {d.seconds} / 3着 {d.thirds}　複勝率 {d.completed?`${(d.top3/d.completed*100).toFixed(1)}%`:"-"}</div>
               </button>)}

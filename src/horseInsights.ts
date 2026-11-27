@@ -7,13 +7,15 @@ const days=(a:string,b:string)=>(Date.parse(a)-Date.parse(b))/86400000;
 export const REFERENCE_MIN=10;
 function previousDate(h:any,date:string){return (h.pastRunEvidence||[]).map((r:any)=>day(r.date)).filter((d:string)=>d&&d<date).sort().at(-1)||'';}
 function rest(h:any,date:string):boolean|null {const w=value(h.layoffWeeks);if(w!==null&&w>=0)return w>=12;const p=previousDate(h,date);return p?days(date,p)>=84:null;}
-export function historyIndex(races:any[]){
+export function historyIndex(races:any[],names?:string[]){
+ const wanted=names===undefined?null:new Set(names.map(nameKey).filter(Boolean));
+ if(wanted?.size===0)return new Map<string,HorseStart[]>();
  const versions=new Map<string,any>();
  for(const r of races){const d=day(r.raceDate);if(!d||r.status!=='completed')continue;const key=[d,r.track,Number(r.raceNo),r.surface||'ダート'].join('|');if(!r.track||!Number(r.raceNo))continue;
   const old=versions.get(key);if(!old||String(r.updatedAt||r.savedAt||'')>String(old.updatedAt||old.savedAt||''))versions.set(key,r);
  }
  const map=new Map<string,HorseStart[]>();
- for(const [key,r] of versions){for(const h of r.horses||[]){const name=nameKey(h.name);if(!name||['取消','除外','DNS'].includes(h.raceStatus))continue;
+ for(const [key,r] of versions){for(const h of r.horses||[]){const name=nameKey(h.name);if(!name||(wanted&&!wanted.has(name))||['取消','除外','DNS'].includes(h.raceStatus))continue;
   const f=value(h.actualFinish)??value(h.finish);const valid=f!==null&&Number.isInteger(f)&&f>=1&&f<=24;
   // A missing finish is not a loss. Only an explicitly recorded DNF/disqualification is a failure.
   if(!valid&&!['中止','失格'].includes(h.raceStatus))continue;
